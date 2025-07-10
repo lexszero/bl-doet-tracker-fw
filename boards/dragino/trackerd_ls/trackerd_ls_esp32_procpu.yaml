@@ -1,0 +1,19 @@
+identifier: dragino_trackerd_ls
+name: TrackerD-LS
+vendor: dragino
+type: mcu
+arch: xtensa
+ram: 256
+flash: 1024
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - i2c
+  - spi
+  - watchdog
+  - uart
+  - pinmix
+  - lora
+  - nvs
+

@@ -1,0 +1,23 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig LED_STATUS
+	bool "Blinking status LED device drivers"
+	help
+	  This option enables the blinking status LED custom driver class.
+
+if LED_STATUS
+
+config LED_STATUS_INIT_PRIORITY
+	int "Blink status LED device drivers init priority"
+	default KERNEL_INIT_PRIORITY_DEVICE
+	help
+	  Blinking status LED device drivers init priority.
+
+module = LED_STATUS
+module-str = led_status
+source "subsys/logging/Kconfig.template.log_config"
+
+rsource "Kconfig.gpio_led"
+
+endif # BLINK

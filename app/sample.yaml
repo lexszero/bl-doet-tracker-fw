@@ -9,6 +9,7 @@ common:
   integration_platforms:
     - custom_plank
     - nucleo_f302r8
+    - trackerd_ls
 tests:
   app.default: {}
   app.debug:

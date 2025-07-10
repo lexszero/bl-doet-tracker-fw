@@ -1,0 +1,31 @@
+# Copyright (c) 2021 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+description: |
+  Generic GNSS NMEA receiver
+
+  Implement a generic NMEA based GNSS device.
+
+  Example configuration:
+
+  &uart0 {
+          current-speed = <9600>;
+          ...
+          gnss: gnss-nmea-generic-switched {
+                  compatible = "gnss-nmea-generic-switched";
+                  gpio-power = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+                  gpio-reset = <&gpio0 25 GPIO_ACTIVE_LOW>;
+          };
+  };
+
+compatible: "gnss-nmea-generic-gpio"
+
+include:
+  - uart-device.yaml
+
+properties:
+  power-gpios:
+    type: phandle-array
+    description: Pin controlling VSS power supply
+  reset-gpios:
+    type: phandle-array
+    description: Reset pin

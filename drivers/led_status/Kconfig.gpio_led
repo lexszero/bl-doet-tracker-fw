@@ -1,0 +1,10 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+config LED_STATUS_GPIO
+	bool "GPIO-controlled blinking status LED driver"
+	default y
+	depends on DT_HAS_LED_STATUS_GPIO_ENABLED
+	select GPIO
+	help
+	  Enable this option to use the GPIO-controlled status LED blink driver.

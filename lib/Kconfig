@@ -3,6 +3,7 @@
 
 menu "Custom libraries"
 
-rsource "custom/Kconfig"
+rsource "gnss/Kconfig"
+#rsource "led_status/Kconfig"
 
 endmenu

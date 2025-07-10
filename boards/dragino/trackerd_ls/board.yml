@@ -1,0 +1,6 @@
+board:
+  name: trackerd_ls
+  full_name: TrackerD-LS
+  vendor: dragino
+  socs:
+    - name: esp32
