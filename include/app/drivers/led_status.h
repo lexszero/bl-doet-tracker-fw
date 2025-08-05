@@ -29,12 +29,12 @@ static inline int z_impl_led_status_set_blink(const struct device *dev, uint32_t
 
 static inline int led_status_on(const struct device *dev)
 {
-	return led_status_set_solid(dev, false);
+	return led_status_set_solid(dev, true);
 }
 
 static inline int led_status_off(const struct device *dev)
 {
-	return led_status_set_solid(dev, true);
+	return led_status_set_solid(dev, false);
 }
 
 static inline int led_status_blink_once(const struct device *dev, uint32_t on_ms, uint32_t off_ms, uint32_t blink_num)

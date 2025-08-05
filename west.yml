@@ -19,3 +19,5 @@ manifest:
         name-allowlist:
           - hal_espressif
           - loramac-node
+          - littlefs
+          - mbedtls

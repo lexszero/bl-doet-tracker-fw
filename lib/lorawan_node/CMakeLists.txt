@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 zephyr_library()
-zephyr_library_sources(led_status.c)
+zephyr_library_sources(lorawan_node.c)

@@ -4,6 +4,6 @@
 menu "Custom libraries"
 
 rsource "gnss/Kconfig"
-#rsource "led_status/Kconfig"
+rsource "lorawan_node/Kconfig"
 
 endmenu
