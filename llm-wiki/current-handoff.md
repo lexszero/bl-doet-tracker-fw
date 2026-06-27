@@ -160,17 +160,66 @@ Issue #3 bench validation:
   - later GNSS drift guard activation on a false GNSS speed/altitude jump without forcing active/moving state.
 - This validates the stationary bench case. A real moving/shaking vehicle test is still needed to tune thresholds and prove movement resumes `10 s`/`30 s` cadence as intended.
 
+Issue #2 first provisioning implementation:
+
+- `app/src/settings.c` is now a real tracker settings module and is compiled by `app/CMakeLists.txt`.
+- The app registers a Zephyr settings subtree named `tracker`.
+- LoRaWAN OTAA identity settings are stored as raw binary values under:
+  - `tracker/lorawan/dev_eui`: `8` bytes;
+  - `tracker/lorawan/join_eui`: `8` bytes;
+  - `tracker/lorawan/app_key`: `16` bytes.
+- `tracker/lorawan/identity_crc` is an internal marker used to detect a changed identity. It is not a security boundary.
+- `lib/lorawan_node/lorawan_node.c` now obtains DevEUI / JoinEUI / AppKey from the settings layer before joining.
+- The old placeholder LoRaWAN identity remains only as an unprovisioned development fallback in `app/src/settings.c`; it is no longer exposed as constants in `include/app/lib/lorawan_node.h`.
+- If all three LoRaWAN identity values are present, the firmware treats the device as provisioned. Partial or malformed settings are ignored and the firmware falls back rather than failing boot.
+- When a provisioned identity is first applied or changes, the firmware clears Zephyr's stored LoRaWAN MAC/session state under `lorawan/nvm/*` once and stores the new identity marker. This avoids carrying stale session context across identity changes without resetting DevNonce every boot.
+- The AppKey is never logged; provisioning status only prints whether it is set.
+- `app/provisioning.conf` enables `CONFIG_TRACKER_PROVISIONING_MODE`, which keeps the serial shell alive but disables normal GNSS/LoRaWAN tracker runtime while credentials are being written.
+- The temporary provisioning build exposes the app-specific command:
+
+```text
+tracker provision status
+tracker provision set <dev_eui_hex> <join_eui_hex> <app_key_hex>
+tracker provision clear
+```
+
+- The default production firmware remains read-only on UART.
+- The Docker helper now accepts `-ExtraConf`, so a provisioning build can be produced with:
+
+```powershell
+.\scripts\dev\zephyr-docker.ps1 build -Pristine -ExtraConf app\provisioning.conf -BuildDir build/trackerd_ls_provision -ArtifactName trackerd_ls_provision
+```
+
+- Local build validation on 2026-06-27:
+  - default production build passed, artifact `.codex-local/artifacts/trackerd_ls/zephyr.bin`, size `258048` bytes;
+  - provisioning shell build passed, artifact `.codex-local/artifacts/trackerd_ls_provision/zephyr.bin`, size `323584` bytes.
+- The #2 provisioning path has now been flashed and validated on the hardware bench.
+- Validation sequence:
+  - built and flashed the temporary provisioning shell image;
+  - used ChirpStack API on the bench to read the Lex-provided device identity and keys without printing the key;
+  - provisioned the tracker over serial with `tracker provision set ...`;
+  - flashed the default production image back over the provisioning image;
+  - confirmed the production firmware loaded the LoRaWAN identity from settings and joined as the provisioned ChirpStack device.
+- ChirpStack device profile is LoRaWAN `1.0.3`. The ChirpStack API field to use as this firmware's single OTAA key is `nwk_key` for that profile, even though the firmware field is currently named `app_key` and passes the same value to Zephyr's `nwk_key` and `app_key` join fields.
+- Bench validation showed:
+  - `tracker_settings: LoRaWAN identity loaded from tracker settings`;
+  - `Joining network over OTAA (provisioned DevEUI ...)`;
+  - `Joined network!`;
+  - port `13` boot marker reached ChirpStack and still triggers the expected stock-decoder codec error;
+  - port `4` position uplink reached ChirpStack and decoded to latitude/longitude/HDOP.
+- The currently flashed remote tracker image is now the issue #2 production build at `/home/christian/codex/flash/trackerd_ls/zephyr-issue2-settings.bin`, with the issue #3 adaptive uplink behavior still included.
+
 LoRa backend observation:
 
 - ChirpStack access through the private bench path works. Keep hostnames, internal IPs, credentials, exact URLs, and device identifiers in `llm-wiki/private/`.
 - MQTT subscription attempts did not show useful Tracker_108 application events during this session. ChirpStack's gRPC API did work for application event and gateway-frame inspection.
 - ChirpStack application event history for the Lex-provided Tracker_108 device includes port `4` uplinks whose 10 byte payload decodes exactly as the firmware format: little-endian `int32_t lat`, `int32_t lon`, and `uint16_t hdop`.
-- The currently flashed firmware does **not** identify as that Tracker_108 device. Gateway-frame inspection of a live reset showed the current firmware JoinRequest uses the placeholder DevEUI / JoinEUI from `include/app/lib/lorawan_node.h`.
+- The currently flashed firmware does **not** identify as that Tracker_108 device. Gateway-frame inspection of a live reset showed the current firmware JoinRequest uses the placeholder DevEUI / JoinEUI that was hardcoded before the #2 provisioning work.
 - Live gateway frames confirmed the current firmware's LoRa packets are reaching the gateway:
   - JoinRequest from the placeholder DevEUI;
   - unconfirmed uplink on port `13` for the `de ad ca fe` boot marker;
   - unconfirmed uplink on port `4` for the position payload.
-- Because the current firmware uses placeholder LoRaWAN identity values, current live uplinks should not be expected to appear under Lex's Tracker_108 application device until issue #2/settings/provisioning is addressed or the firmware is temporarily built with the Tracker_108 credentials.
+- The currently flashed firmware is provisioned and live uplinks now appear under the Lex-provided ChirpStack device. If NVS is erased or a new unprovisioned device is flashed, fallback-identity live uplinks should again be expected only in gateway frames unless a matching temporary ChirpStack device exists.
 - The stock Tracker_108 decoder reports a codec error on the port `13` boot marker. If the boot marker stays, the ChirpStack decoder should ignore or handle non-position ports.
 
 Historical caveat:
@@ -182,15 +231,14 @@ Historical caveat:
 
 ## Next Best Steps
 
-1. Decide how to provision real LoRaWAN identity values. The current hardcoded placeholder DevEUI is enough to prove gateway RF receipt, but not enough to view current data under Lex's Tracker_108 device.
-2. For a quick backend validation, temporarily build with the Tracker_108 DevEUI / JoinEUI / AppKey in private/local config or create a matching temporary ChirpStack device for the placeholder identity.
-3. Update the ChirpStack decoder to handle or ignore port `13`, or remove the `de ad ca fe` boot marker before relying on the app event stream.
-4. Test the adaptive uplink policy on a physically moving tracker or by safely shaking/moving the bench device while watching `motion state:` and `position uplink:` logs.
-5. Tune `GNSS_ACTIVE_SPEED_MM_S`, `GNSS_MOVING_SPEED_MM_S`, `ACCEL_VECTOR_DELTA_MM_S2`, and the three interval constants from real movement traces.
-6. Keep the read-only UART log console unless interactive shell access is explicitly needed.
-7. Let the current build run longer and capture whether it remains stable through repeated stationary heartbeats, movement resumes, and any downlink activity.
-8. If an interactive shell is needed later, prefer a separate debug config or first try `CONFIG_SHELL_ECHO_STATUS=n`; do not reintroduce shell echo into the default firmware without retesting the bench console and DTR/RTS behavior.
-9. If Lex provides an original or known-good `zephyr.bin`, keep it for comparison, but it is no longer required just to prove the UART/reset path.
+1. Update the ChirpStack decoder to handle or ignore port `13`, or remove the `de ad ca fe` boot marker before relying on a clean application event stream.
+2. Test the adaptive uplink policy on a physically moving tracker or by safely shaking/moving the bench device while watching `motion state:` and `position uplink:` logs.
+3. Tune `GNSS_ACTIVE_SPEED_MM_S`, `GNSS_MOVING_SPEED_MM_S`, `ACCEL_VECTOR_DELTA_MM_S2`, and the three interval constants from real movement traces.
+4. Decide whether the settings model should support separate LoRaWAN 1.1 `nwk_key` and `app_key` values later. The current single-key implementation works for the validated LoRaWAN 1.0.3 TrackerD profile.
+5. Keep the read-only UART log console unless interactive shell access is explicitly needed.
+6. Let the current build run longer and capture whether it remains stable through repeated stationary heartbeats, movement resumes, and any downlink activity.
+7. If an interactive shell is needed later, prefer the separate provisioning/debug overlay or first try `CONFIG_SHELL_ECHO_STATUS=n`; do not reintroduce shell echo into the default firmware without retesting the bench console and DTR/RTS behavior.
+8. If Lex provides an original or known-good `zephyr.bin`, keep it for comparison, but it is no longer required just to prove the UART/reset path.
 
 ## Useful Local Commands
 
@@ -204,6 +252,12 @@ Build clean:
 
 ```powershell
 .\scripts\dev\zephyr-docker.ps1 build -Pristine
+```
+
+Build the temporary provisioning shell image:
+
+```powershell
+.\scripts\dev\zephyr-docker.ps1 build -Pristine -ExtraConf app\provisioning.conf -BuildDir build/trackerd_ls_provision -ArtifactName trackerd_ls_provision
 ```
 
 Check Git state:

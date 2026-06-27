@@ -1,6 +1,8 @@
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/util.h>
 
+#include "app/settings.h"
 #include "app/lib/lorawan_node.h"
 
 #define DELAY K_MSEC(10000)
@@ -36,7 +38,7 @@ static void lorwan_datarate_changed(enum lorawan_datarate dr)
 	LOG_INF("New Datarate: DR_%d, Max Payload %d", dr, max_size);
 }
 
-int lorawan_node_init()
+int lorawan_node_init(void)
 {
 	LOG_INF("Initializing");
 	const struct device *lora_dev;
@@ -75,22 +77,27 @@ int lorawan_node_init()
 	return 0;
 }
 
-int lorawan_node_join()
+int lorawan_node_join(void)
 {
 	LOG_INF("Initializing");
 	struct lorawan_join_config join_cfg;
-	uint8_t dev_eui[] = LORAWAN_DEV_EUI;
-	uint8_t join_eui[] = LORAWAN_JOIN_EUI;
-	uint8_t app_key[] = LORAWAN_APP_KEY;
+	struct tracker_lorawan_settings lorawan_settings;
+	char dev_eui_hex[(TRACKER_LORAWAN_EUI_LEN * 2) + 1];
+
+	tracker_lorawan_settings_get(&lorawan_settings);
+	(void)bin2hex(lorawan_settings.dev_eui, sizeof(lorawan_settings.dev_eui),
+		      dev_eui_hex, sizeof(dev_eui_hex));
 
 	join_cfg.mode = LORAWAN_ACT_OTAA;
-	join_cfg.dev_eui = dev_eui;
-	join_cfg.otaa.join_eui = join_eui;
-	join_cfg.otaa.app_key = app_key;
-	join_cfg.otaa.nwk_key = app_key;
+	join_cfg.dev_eui = lorawan_settings.dev_eui;
+	join_cfg.otaa.join_eui = lorawan_settings.join_eui;
+	join_cfg.otaa.app_key = lorawan_settings.app_key;
+	join_cfg.otaa.nwk_key = lorawan_settings.app_key;
 	join_cfg.otaa.dev_nonce = 0u;
 
-	LOG_INF("Joining network over OTAA");
+	LOG_INF("Joining network over OTAA (%s DevEUI %s)",
+		lorawan_settings.provisioned ? "provisioned" : "fallback",
+		dev_eui_hex);
 	int ret = lorawan_join(&join_cfg);
 	if (ret < 0) {
 		LOG_ERR("lorawan_join_network failed: %d", ret);

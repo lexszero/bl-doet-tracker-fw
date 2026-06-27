@@ -9,6 +9,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/sys/util.h>
 
 #include <app_version.h>
 
@@ -405,14 +406,26 @@ int handle_event_gnss_position()
 
 int main(void)
 {
+	int ret;
+
 	LOG_INF("DoET :: Tracker %s\n", APP_VERSION_STRING);
+
+	ret = tracker_settings_init();
+	if (ret != 0) {
+		LOG_ERR("tracker settings init failed: %d", ret);
+	}
+
+	if (IS_ENABLED(CONFIG_TRACKER_PROVISIONING_MODE)) {
+		LOG_INF("tracker provisioning mode active; runtime services disabled");
+		while (1) {
+			k_sleep(K_SECONDS(60));
+		}
+	}
 
 	gnss_init(gnss_position_cb);
 	tracker_motion_init();
 	led_status_blink_once(LED_G, 100, 100, 3);
 	lorawan_node_init();
-
-	int ret;
 
 	while (1) {
 		if (!lorawan_joined) {

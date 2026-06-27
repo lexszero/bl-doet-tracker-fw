@@ -44,6 +44,14 @@ Expected main artifact:
 .codex-local/artifacts/trackerd_ls/zephyr.bin
 ```
 
+Optional temporary provisioning-shell build for writing LoRaWAN identity settings:
+
+```powershell
+.\scripts\dev\zephyr-docker.ps1 build -Pristine -ExtraConf app\provisioning.conf -BuildDir build/trackerd_ls_provision -ArtifactName trackerd_ls_provision
+```
+
+That image disables the normal tracker runtime and exposes `tracker provision status`, `tracker provision set <dev_eui_hex> <join_eui_hex> <app_key_hex>`, and `tracker provision clear` on the serial shell. For ChirpStack LoRaWAN 1.0.x devices, the API field to pass as `<app_key_hex>` is usually `nwk_key`. Do not commit real LoRaWAN keys or private bench details.
+
 ## Current Compatibility Build
 
 During initial remote-device debugging, the working build workspace used Zephyr `v4.2.0-rc3` with Zephyr SDK `0.16.8`. If you need to reproduce that temporary path, use the existing local Docker volumes:

@@ -13,3 +13,10 @@ endmenu
 module = APP
 module-str = APP
 source "subsys/logging/Kconfig.template.log_config"
+
+config TRACKER_PROVISIONING_MODE
+	bool "Tracker serial provisioning mode"
+	help
+	  Disable the normal tracker runtime so a shell build can safely write
+	  persistent provisioning settings without the LoRaWAN stack joining or
+	  updating its NVM state at the same time.

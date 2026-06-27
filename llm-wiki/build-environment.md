@@ -39,12 +39,24 @@ Modern build:
 
 Artifacts are exported to `.codex-local/artifacts/trackerd_ls/`.
 
+Optional overlay builds can pass a repo-local config fragment with `-ExtraConf`.
+For example, the temporary issue #2 provisioning shell image is built with:
+
+```powershell
+.\scripts\dev\zephyr-docker.ps1 build -Pristine -ExtraConf app\provisioning.conf -BuildDir build/trackerd_ls_provision -ArtifactName trackerd_ls_provision
+```
+
+This exports artifacts to `.codex-local/artifacts/trackerd_ls_provision/`.
+That overlay enables `CONFIG_TRACKER_PROVISIONING_MODE`, so it is for writing
+settings only and does not run the normal tracker GNSS/LoRaWAN loop.
+
 2026-06-27 validation:
 
 - `west update` completed for the `tracker-zephyr-workspace-v4.4.1` Docker volume.
 - The modern build completed with Zephyr `v4.4.1` and Zephyr SDK `1.0.1`.
 - Required migration: replace the old `CONFIG_LORAMAC_REGION_EU868` symbol with `CONFIG_LORAWAN_REGION_EU868`.
 - Removed stale networking/Wi-Fi stack assignments while networking remains disabled.
+- 2026-06-27: the default issue #2 settings/provisioning build passed and remained `258048` bytes. The separate `app/provisioning.conf` shell build passed at `323584` bytes.
 
 ## Compatibility Path
 

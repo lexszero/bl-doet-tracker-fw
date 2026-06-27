@@ -45,7 +45,7 @@ If the device is silent, toggle DTR in `picocom` with `Ctrl-A` then `t`. The cap
 - In the stationary capture, reported speed was often nonzero before settling to 0, and latitude drifted by roughly 13 m over the first 20 seconds after fix acquisition. Treat raw GPS position/speed as jittery enough to need filtering or motion gating.
 - The Zephyr shell is enabled. `log disable` successfully stops runtime log spam, making shell inspection practical.
 - `device list` confirms all expected tracker devices are ready: `uart0`, `uart1`, `i2c0`, `spi3`, `led_r`, `led_g`, `led_b`, `GNSS power`, `quectel-L76k`, `lora@0`, and `lis3dh@19`.
-- `settings list` currently shows only LoRaWAN NVM keys under `lorawan/nvm/*`; no product/application settings subtree is present yet. Avoid dumping `lorawan/nvm/Crypto` or `lorawan/nvm/SecureElement` in shared logs because they may include session or key material.
+- Earlier builds showed only LoRaWAN NVM keys under `lorawan/nvm/*`. After the issue #2 settings work, product settings live under `tracker/*` once provisioned. Avoid dumping `lorawan/nvm/Crypto` or `lorawan/nvm/SecureElement` in shared logs because they may include session or key material.
 - `sensor get lis3dh@19` works. One stationary sample returned acceleration around `(3.56, 6.24, 6.59) m/s^2`, with total magnitude close to 9.8 m/s^2, so the accelerometer path is producing plausible gravity readings.
 - Broad `sensor attr_get lis3dh@19` is not useful on this firmware: the shell iterates many generic channels/attributes and the driver returns `-88` (`ENOTSUP`) for unsupported attributes, producing a large amount of noise. Prefer targeted reads or firmware-side sensor configuration.
 - `settings -h` shows list/read/write/delete support. `lora -h` exposes raw LoRa radio config/send/recv/test commands, not LoRaWAN application commands.
@@ -61,7 +61,18 @@ If the device is silent, toggle DTR in `picocom` with `Ctrl-A` then `t`. The cap
 
 - ChirpStack gateway-frame inspection is useful when application events are missing. It confirmed the current firmware's live RF packets reached a gateway even though they were not shown under the expected application device.
 - Application event history can validate payload decoding, but always confirm the firmware DevEUI / JoinEUI / AppKey match the ChirpStack device being inspected.
-- The current source still contains placeholder LoRaWAN identity constants in `include/app/lib/lorawan_node.h`; backend validation against a named ChirpStack device needs real provisioned credentials or a matching temporary ChirpStack device.
+- The source now supports persistent LoRaWAN identity settings under `tracker/lorawan/*`, but a device is not actually provisioned until those settings are written to its NVS storage.
+- The unprovisioned fallback identity is still the old placeholder value, now centralized in `app/src/settings.c`. Backend validation against a named ChirpStack device needs real provisioned credentials or a matching temporary ChirpStack device.
+- Use the temporary provisioning shell build when credentials need to be written over serial. This build enables `CONFIG_TRACKER_PROVISIONING_MODE`, so it does not start the normal GNSS/LoRaWAN tracker runtime:
+
+```shell
+tracker provision status
+tracker provision set <dev_eui_hex> <join_eui_hex> <app_key_hex>
+tracker provision clear
+```
+
+- The provisioning command stores DevEUI, JoinEUI, and AppKey but never prints the AppKey. Keep real AppKeys in ignored/private notes only.
+- ChirpStack v4 exposes multiple root-key fields. For the validated TrackerD device profile (`LORAWAN_1_0_3`), use the ChirpStack API `nwk_key` value as the firmware's current single OTAA key. Do not use `app_key` / `gen_app_key` for that profile unless the firmware is later extended for LoRaWAN 1.1 separate root keys.
 
 ## Validation expectations
 

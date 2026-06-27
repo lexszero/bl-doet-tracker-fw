@@ -11,6 +11,7 @@ param(
     [string]$Board = "trackerd_ls/esp32/procpu",
     [string]$BuildDir = "build/trackerd_ls",
     [string]$ArtifactName = "trackerd_ls",
+    [string]$ExtraConf = "",
 
     [string]$SdkDir = "/opt/toolchains/zephyr-sdk-1.0.1",
     [string]$SdkVolume = "",
@@ -23,6 +24,30 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).ProviderPath
 $artifactDir = Join-Path $repoRoot ".codex-local\artifacts\$ArtifactName"
 New-Item -ItemType Directory -Force $artifactDir | Out-Null
+
+function ConvertTo-DockerRepoPath {
+    param([string]$HostPath)
+
+    if ([string]::IsNullOrWhiteSpace($HostPath)) {
+        return ""
+    }
+
+    $candidate = if ([System.IO.Path]::IsPathRooted($HostPath)) {
+        $HostPath
+    } else {
+        Join-Path $repoRoot $HostPath
+    }
+
+    $resolved = (Resolve-Path $candidate).ProviderPath
+    $repoRootWithSlash = if ($repoRoot.EndsWith("\")) { $repoRoot } else { "$repoRoot\" }
+
+    if (-not $resolved.StartsWith($repoRootWithSlash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path must be inside the repository: $HostPath"
+    }
+
+    $relative = $resolved.Substring($repoRootWithSlash.Length) -replace "\\", "/"
+    return "/workspace/bl-doet-tracker-fw/$relative"
+}
 
 function New-DockerArgs {
     param([switch]$Interactive)
@@ -94,13 +119,18 @@ west list zephyr
 
     "build" {
         $pristineArg = if ($Pristine) { "-p always" } else { "-p auto" }
+        $cmakeArgs = "-DBOARD_ROOT=/workspace/bl-doet-tracker-fw"
+        if ($ExtraConf) {
+            $dockerExtraConf = ConvertTo-DockerRepoPath $ExtraConf
+            $cmakeArgs += " -DEXTRA_CONF_FILE='$dockerExtraConf'"
+        }
         Invoke-DockerScript @"
 set -euo pipefail
 test -d /workspace/.west || {
     echo "Workspace is not initialized. Run: .\scripts\dev\zephyr-docker.ps1 init"
     exit 2
 }
-west build $pristineArg -b '$Board' /workspace/bl-doet-tracker-fw/app -d '/workspace/$BuildDir' -- -DBOARD_ROOT=/workspace/bl-doet-tracker-fw
+west build $pristineArg -b '$Board' /workspace/bl-doet-tracker-fw/app -d '/workspace/$BuildDir' -- $cmakeArgs
 mkdir -p /artifacts
 cp '/workspace/$BuildDir/zephyr/zephyr.bin' /artifacts/zephyr.bin
 cp '/workspace/$BuildDir/zephyr/zephyr.elf' /artifacts/zephyr.elf
