@@ -1,0 +1,78 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * TrackerD-LS 4 MB flash layout.
+ *
+ * Based on Zephyr's Espressif 0x1000 AMP layout, but with 1 MiB primary and
+ * secondary image slots. The reclaimed space is a dedicated diagnostic-log
+ * partition, while the existing storage partition keeps its original address so
+ * provisioned settings survive this layout change.
+ */
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@1000 {
+			label = "mcuboot";
+			reg = <0x1000 DT_SIZE_K(60)>;
+		};
+
+		sys_partition: partition@10000 {
+			label = "sys";
+			reg = <0x10000 DT_SIZE_K(64)>;
+		};
+
+		slot0_partition: partition@20000 {
+			label = "image-0";
+			reg = <0x20000 DT_SIZE_M(1)>;
+		};
+
+		slot1_partition: partition@120000 {
+			label = "image-1";
+			reg = <0x120000 DT_SIZE_M(1)>;
+		};
+
+		slot0_appcpu_partition: partition@220000 {
+			label = "image-0-appcpu";
+			reg = <0x220000 DT_SIZE_K(448)>;
+		};
+
+		slot1_appcpu_partition: partition@290000 {
+			label = "image-1-appcpu";
+			reg = <0x290000 DT_SIZE_K(448)>;
+		};
+
+		slot0_lpcore_partition: partition@300000 {
+			label = "image-0-lpcore";
+			reg = <0x300000 DT_SIZE_K(32)>;
+		};
+
+		slot1_lpcore_partition: partition@308000 {
+			label = "image-1-lpcore";
+			reg = <0x308000 DT_SIZE_K(32)>;
+		};
+
+		diagnostic_log_partition: partition@310000 {
+			label = "diagnostic-log";
+			reg = <0x310000 DT_SIZE_K(640)>;
+		};
+
+		storage_partition: partition@3b0000 {
+			label = "storage";
+			reg = <0x3b0000 DT_SIZE_K(192)>;
+		};
+
+		scratch_partition: partition@3e0000 {
+			label = "image-scratch";
+			reg = <0x3e0000 DT_SIZE_K(124)>;
+		};
+
+		coredump_partition: partition@3ff000 {
+			label = "coredump";
+			reg = <0x3ff000 DT_SIZE_K(4)>;
+		};
+	};
+};

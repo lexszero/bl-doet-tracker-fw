@@ -222,6 +222,21 @@ LoRa backend observation:
 - The currently flashed firmware is provisioned and live uplinks now appear under the Lex-provided ChirpStack device. If NVS is erased or a new unprovisioned device is flashed, fallback-identity live uplinks should again be expected only in gateway frames unless a matching temporary ChirpStack device exists.
 - The stock Tracker_108 decoder reports a codec error on the port `13` boot marker. If the boot marker stays, the ChirpStack decoder should ignore or handle non-position ports.
 
+Storage/logging assessment:
+
+- See [storage-and-logging.md](storage-and-logging.md) for the current storage map and logging options.
+- The bench device reports ESP32-PICO-D4 with `4MB` embedded flash.
+- The board now uses a repo-local 4 MB partition layout in `boards/dragino/trackerd_ls/trackerd_ls_partitions_4m.dtsi`.
+- The generated Zephyr `v4.4.1` flash layout has `1 MiB` `image-0` and `image-1` slots.
+- Reclaimed space is exposed as a new `diagnostic-log` partition at `0x310000` with size `640 KiB`.
+- The existing `storage` partition intentionally stays at `0x3b0000` with size `192 KiB`, so flashing the app over the previous layout should preserve already-provisioned settings.
+- The current settings/NVS backend uses up to eight erase sectors from that storage partition, expected to be about `32 KiB` on this ESP32 flash.
+- The default firmware has UART logging, NVS settings, and flash-map support, but no filesystem, disk layer, SDHC, SDMMC, FAT, or LittleFS enabled.
+- The generated devicetree leaves both ESP32 SDHC slots disabled. Treat SD-card logging as unverified/unavailable until physical board inspection or schematic plus a Zephyr SDHC test proves it.
+- Recommended near-term logging is bench-side serial capture. If on-device logging is needed, prefer a compact binary circular diagnostic journal in `diagnostic-log`, not raw text logs in the settings NVS area.
+- Local build validation after the partition change passed for the default production image (`258048` bytes) and provisioning shell image (`323584` bytes).
+- The partition-layout production image was flashed to the hardware bench on 2026-06-27. A 90 second capture showed settings loaded from NVS, OTAA join success, one position uplink, and zero `FATAL`/`ASSERT` markers. The currently flashed remote image is now the partition-layout build with issue #2 and issue #3 behavior included.
+
 Historical caveat:
 
 - Before the modern image was flashed, the remote tracker had a locally built `origin/dev/tracker` reference candidate from commit `2976538`.

@@ -57,6 +57,7 @@ settings only and does not run the normal tracker GNSS/LoRaWAN loop.
 - Required migration: replace the old `CONFIG_LORAMAC_REGION_EU868` symbol with `CONFIG_LORAWAN_REGION_EU868`.
 - Removed stale networking/Wi-Fi stack assignments while networking remains disabled.
 - 2026-06-27: the default issue #2 settings/provisioning build passed and remained `258048` bytes. The separate `app/provisioning.conf` shell build passed at `323584` bytes.
+- 2026-06-27: the board switched from Zephyr's stock Espressif 4 MB AMP partition include to a repo-local layout with `1 MiB` `image-0` / `image-1` slots and a new `640 KiB` `diagnostic-log` partition. The existing `storage` partition remains at `0x3b0000` / `192 KiB` to preserve provisioned settings. Clean default and provisioning builds both passed after this change, and the production image was flashed to hardware with settings load, OTAA join, and position uplink confirmed.
 
 ## Compatibility Path
 

@@ -3,7 +3,7 @@
 #include <espressif/esp32/esp32_pico_d4.dtsi>
 #include "trackerd_ls-pinctrl.dtsi"
 #include <zephyr/dt-bindings/input/input-event-codes.h>
-#include <espressif/partitions_0x1000_amp.dtsi>
+#include "trackerd_ls_partitions_4m.dtsi"
 
 / {
 	model = "Dragino TrackerD-LS PROCPU";

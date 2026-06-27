@@ -17,6 +17,7 @@ This wiki is the AI-agent knowledge base for this repository. It should stay sma
 - [Project map](project-map.md): repository structure and important entry points.
 - [Build environment](build-environment.md): local Docker build workflow and Zephyr version direction.
 - [Development process](development-process.md): device access, remote validation, and development expectations.
+- [Storage and logging](storage-and-logging.md): current flash layout, logging options, and open SD-card questions.
 - [Working agreements](working-agreements.md): how AI agents should change code and maintain this wiki.
 
 ## How to update this wiki
