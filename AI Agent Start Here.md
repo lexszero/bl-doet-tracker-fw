@@ -14,13 +14,14 @@ Read it before making code changes. Update it when you learn durable project kno
 
 1. [README.md](README.md) for the human-facing project overview and build commands.
 2. [llm-wiki/README.md](llm-wiki/README.md) for the AI-facing wiki index.
-3. [llm-wiki/project-context.md](llm-wiki/project-context.md) for ownership and product context.
-4. [llm-wiki/github-issues.md](llm-wiki/github-issues.md) for Lex's current public issue summaries.
-5. [llm-wiki/branch-inventory.md](llm-wiki/branch-inventory.md) for remote branch context.
-6. [llm-wiki/project-map.md](llm-wiki/project-map.md) for the current repository layout.
-7. [llm-wiki/development-process.md](llm-wiki/development-process.md) for device access and validation expectations.
-8. [llm-wiki/working-agreements.md](llm-wiki/working-agreements.md) for collaboration and documentation rules.
-9. The source, config, board, driver, or test files relevant to the current task.
+3. [llm-wiki/current-handoff.md](llm-wiki/current-handoff.md) for the latest cross-chat state.
+4. [llm-wiki/project-context.md](llm-wiki/project-context.md) for ownership and product context.
+5. [llm-wiki/github-issues.md](llm-wiki/github-issues.md) for Lex's current public issue summaries.
+6. [llm-wiki/branch-inventory.md](llm-wiki/branch-inventory.md) for remote branch context.
+7. [llm-wiki/project-map.md](llm-wiki/project-map.md) for the current repository layout.
+8. [llm-wiki/development-process.md](llm-wiki/development-process.md) for device access and validation expectations.
+9. [llm-wiki/working-agreements.md](llm-wiki/working-agreements.md) for collaboration and documentation rules.
+10. The source, config, board, driver, or test files relevant to the current task.
 
 ## Before changing files
 

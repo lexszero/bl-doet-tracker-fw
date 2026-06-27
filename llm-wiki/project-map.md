@@ -37,6 +37,7 @@ This repository is organized like a Zephyr workspace application/module.
 
 - [tests/lib/custom](../tests/lib/custom): Twister test coverage for the custom library.
 - [scripts](../scripts): custom west command and runner examples.
+- [scripts/dev/zephyr-docker.ps1](../scripts/dev/zephyr-docker.ps1): local Docker helper for workspace init/update/build/shell/clean.
 
 ## Documentation
 
@@ -49,11 +50,9 @@ This repository is organized like a Zephyr workspace application/module.
 
 Run from the repository root unless stated otherwise.
 
-```shell
-west build -b $BOARD app
-west build -b $BOARD app -- -DEXTRA_CONF_FILE=debug.conf
-west flash
-west twister -T tests --integration
+```powershell
+.\scripts\dev\zephyr-docker.ps1 init
+.\scripts\dev\zephyr-docker.ps1 build -Pristine
 ```
 
 Documentation commands:

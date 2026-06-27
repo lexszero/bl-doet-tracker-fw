@@ -10,5 +10,3 @@ CONFIG_SENSOR=y
 
 # the following config is required to support chips of revision 1
 CONFIG_ESP32_USE_UNSUPPORTED_REVISION=y
-
-CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4=y

@@ -1,138 +1,103 @@
-# Zephyr Example Application
+# Bolderland DoET Tracker Firmware
 
-<a href="https://github.com/zephyrproject-rtos/example-application/actions/workflows/build.yml?query=branch%3Amain">
-  <img src="https://github.com/zephyrproject-rtos/example-application/actions/workflows/build.yml/badge.svg?event=push">
-</a>
-<a href="https://github.com/zephyrproject-rtos/example-application/actions/workflows/docs.yml?query=branch%3Amain">
-  <img src="https://github.com/zephyrproject-rtos/example-application/actions/workflows/docs.yml/badge.svg?event=push">
-</a>
-<a href="https://zephyrproject-rtos.github.io/example-application">
-  <img alt="Documentation" src="https://img.shields.io/badge/documentation-3D578C?logo=sphinx&logoColor=white">
-</a>
-<a href="https://zephyrproject-rtos.github.io/example-application/doxygen">
-  <img alt="API Documentation" src="https://img.shields.io/badge/API-documentation-3D578C?logo=c&logoColor=white">
-</a>
+Firmware for ESP32-based vehicle trackers used by the Bolderland Burn DoET tracking stack.
 
-This repository contains a Zephyr example application. The main purpose of this
-repository is to serve as a reference on how to structure Zephyr-based
-applications. Some of the features demonstrated in this example are:
+The current primary target is the Dragino TrackerD-LS style ESP32 tracker with GNSS, SX127x LoRa radio, LIS2DH/LIS3DH-class accelerometer, and Zephyr shell over UART.
 
-- Basic [Zephyr application][app_dev] skeleton
-- [Zephyr workspace applications][workspace_app]
-- [Zephyr modules][modules]
-- [West T2 topology][west_t2]
-- [Custom boards][board_porting]
-- Custom [devicetree bindings][bindings]
-- Out-of-tree [drivers][drivers]
-- Out-of-tree libraries
-- Example CI configuration (using GitHub Actions)
-- Custom [west extension][west_ext]
-- Custom [Zephyr runner][runner_ext]
-- Doxygen and Sphinx documentation boilerplate
+## Status
 
-This repository is versioned together with the [Zephyr main tree][zephyr]. This
-means that every time that Zephyr is tagged, this repository is tagged as well
-with the same version number, and the [manifest](west.yml) entry for `zephyr`
-will point to the corresponding Zephyr tag. For example, the `example-application`
-v2.6.0 will point to Zephyr v2.6.0. Note that the `main` branch always
-points to the development branch of Zephyr, also `main`.
+This repository is still early firmware. It currently behaves like a Zephyr out-of-tree application with custom board, driver, and library code. Treat the code as a tracker proof of concept that is being turned into a field-deployable firmware.
 
-[app_dev]: https://docs.zephyrproject.org/latest/develop/application/index.html
-[workspace_app]: https://docs.zephyrproject.org/latest/develop/application/index.html#zephyr-workspace-app
-[modules]: https://docs.zephyrproject.org/latest/develop/modules.html
-[west_t2]: https://docs.zephyrproject.org/latest/develop/west/workspaces.html#west-t2
-[board_porting]: https://docs.zephyrproject.org/latest/guides/porting/board_porting.html
-[bindings]: https://docs.zephyrproject.org/latest/guides/dts/bindings.html
-[drivers]: https://docs.zephyrproject.org/latest/reference/drivers/index.html
-[zephyr]: https://github.com/zephyrproject-rtos/zephyr
-[west_ext]: https://docs.zephyrproject.org/latest/develop/west/extensions.html
-[runner_ext]: https://docs.zephyrproject.org/latest/develop/modules.html#external-runners
+## Build Environment
 
-## Getting Started
+The preferred development path is local Docker on Windows/PowerShell. Remote hardware hosts should be used only for flashing, serial logs, and hardware validation.
 
-Before getting started, make sure you have a proper Zephyr development
-environment. Follow the official
-[Zephyr Getting Started Guide](https://docs.zephyrproject.org/latest/getting_started/index.html).
+Required local tools:
 
-### Initialization
+- Docker Desktop
+- Git
+- PowerShell
 
-The first step is to initialize the workspace folder (``my-workspace``) where
-the ``example-application`` and all Zephyr modules will be cloned. Run the following
-command:
+The manifest pins Zephyr to `v4.4.1`. The Docker helper defaults to the compatibility SDK volume used during early bring-up, but the modern target is the SDK included in the official Zephyr Docker image.
 
-```shell
-# initialize my-workspace for the example-application (main branch)
-west init -m https://github.com/zephyrproject-rtos/example-application --mr main my-workspace
-# update Zephyr modules
-cd my-workspace
-west update
+Initialize or update the Zephyr workspace:
+
+```powershell
+.\scripts\dev\zephyr-docker.ps1 init
 ```
 
-### Building and running
+Build the tracker firmware:
 
-To build the application, run the following command:
-
-```shell
-cd example-application
-west build -b $BOARD app
+```powershell
+.\scripts\dev\zephyr-docker.ps1 build -Pristine
 ```
 
-where `$BOARD` is the target board.
+Build artifacts are copied to:
 
-You can use the `custom_plank` board found in this
-repository. Note that Zephyr sample boards may be used if an
-appropriate overlay is provided (see `app/boards`).
-
-A sample debug configuration is also provided. To apply it, run the following
-command:
-
-```shell
-west build -b $BOARD app -- -DEXTRA_CONF_FILE=debug.conf
+```text
+.codex-local/artifacts/trackerd_ls/
 ```
 
-Once you have built the application, run the following command to flash it:
+Expected main artifact:
 
-```shell
-west flash
+```text
+.codex-local/artifacts/trackerd_ls/zephyr.bin
 ```
 
-### Testing
+## Current Compatibility Build
 
-To execute Twister integration tests, run the following command:
+During initial remote-device debugging, the working build workspace used Zephyr `v4.2.0-rc3` with Zephyr SDK `0.16.8`. If you need to reproduce that temporary path, use the existing local Docker volumes:
 
-```shell
-west twister -T tests --integration
+```powershell
+.\scripts\dev\zephyr-docker.ps1 build -WorkspaceVolume tracker-zephyr-workspace -SdkVolume tracker-zephyr-sdk-0.16.8 -SdkDir /opt/toolchains/zephyr-sdk-0.16.8 -Pristine
 ```
 
-### Documentation
+Do not treat that compatibility path as the long-term target.
 
-A minimal documentation setup is provided for Doxygen and Sphinx. To build the
-documentation first change to the ``doc`` folder:
+## Board
 
-```shell
-cd doc
+Primary board target:
+
+```text
+trackerd_ls/esp32/procpu
 ```
 
-Before continuing, check if you have Doxygen installed. It is recommended to
-use the same Doxygen version used in [CI](.github/workflows/docs.yml). To
-install Sphinx, make sure you have a Python installation in place and run:
+Relevant files:
+
+- `boards/dragino/trackerd_ls/`
+- `app/prj.conf`
+- `app/src/main.c`
+- `lib/lorawan_node/`
+- `lib/gnss/`
+- `drivers/led_status/`
+
+## Flashing And Validation
+
+Hardware validation needs a real tracker device. Keep live bench hostnames, ports, SSH keys, serial IDs, and LoRaWAN credentials out of git.
+
+Typical validation flow:
+
+1. Build locally with Docker.
+2. Copy `zephyr.bin` to an approved hardware bench.
+3. Flash with `esptool` using the ESP32 app offset from `runners.yaml`.
+4. Capture UART logs at `115200`.
+5. Confirm boot, GNSS, LoRa radio detection, LoRaWAN join, and shell behavior.
+
+## Tests
+
+The repository still contains example Twister tests. They are not enough to validate tracker behavior yet.
+
+Inside an initialized Zephyr workspace:
 
 ```shell
-pip install -r requirements.txt
+west twister -T /workspace/bl-doet-tracker-fw/tests --integration
 ```
 
-API documentation (Doxygen) can be built using the following command:
+## Agent Notes
 
-```shell
-doxygen
-```
+AI agents should start with:
 
-The output will be stored in the ``_build_doxygen`` folder. Similarly, the
-Sphinx documentation (HTML) can be built using the following command:
+- `AI Agent Start Here.md`
+- `llm-wiki/README.md`
 
-```shell
-make html
-```
-
-The output will be stored in the ``_build_sphinx`` folder. You may check for
-other output formats other than HTML by running ``make help``.
+Update the LLM wiki when adding durable build, validation, hardware, or process knowledge.
