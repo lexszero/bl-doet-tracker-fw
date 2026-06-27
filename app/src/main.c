@@ -104,7 +104,7 @@ int main(void)
 				k_sleep(K_MSEC(500));
 				led_status_off(LED_G);
 
-				const uint8_t msg[] = {0xde, 0xad, 0xca, 0xfe};
+				uint8_t msg[] = {0xde, 0xad, 0xca, 0xfe};
 				int ret = lorawan_send(13, msg, sizeof(msg), LORAWAN_MSG_UNCONFIRMED);
 				if (ret < 0) {
 					LOG_ERR("lorawan_send failed: %d", ret);

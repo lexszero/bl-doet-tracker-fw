@@ -11,6 +11,14 @@
 LOG_MODULE_REGISTER(lorawan_node);
 
 static void dl_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
+			const uint8_t *hex_data);
+
+static struct lorawan_downlink_cb downlink_cb = {
+	.port = LW_RECV_PORT_ANY,
+	.cb = dl_callback
+};
+
+static void dl_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			const uint8_t *hex_data)
 {
 	LOG_INF("Port %d, Pending %d, RSSI %ddB, SNR %ddBm, Time %d", port,
@@ -33,11 +41,6 @@ int lorawan_node_init()
 	LOG_INF("Initializing");
 	const struct device *lora_dev;
 	int ret;
-
-	struct lorawan_downlink_cb downlink_cb = {
-		.port = LW_RECV_PORT_ANY,
-		.cb = dl_callback
-	};
 
 	lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 	if (!device_is_ready(lora_dev)) {
