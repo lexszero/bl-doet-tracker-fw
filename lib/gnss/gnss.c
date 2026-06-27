@@ -1,4 +1,6 @@
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <zephyr/logging/log.h>
 
 #include "app/lib/led_status.h"
@@ -69,15 +71,16 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	const struct gnss_info *info = &data->info;
 	const struct navigation_data *nav_data = &data->nav_data;
 	const struct gnss_time *utc = &data->utc;
+	enum gnss_fix_status previous_fix_status = gnss_data.info.fix_status;
 
 	if (info->fix_status == GNSS_FIX_STATUS_NO_FIX) {
 		led_status_blink_once(LED_R, 50, 50, 2);
-		if (gnss_data.info.fix_status != GNSS_FIX_STATUS_NO_FIX) {
+		if (previous_fix_status != GNSS_FIX_STATUS_NO_FIX) {
 			LOG_INF("fix lost");
 		}
 	} else {
 		led_status_blink_once(LED_G, 50, 50, 2);
-		if (gnss_data.info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
+		if (previous_fix_status == GNSS_FIX_STATUS_NO_FIX) {
 			LOG_INF("fix acquired");
 		}
 		LOG_DBG("info: satellites_cnt: %u, hdop: %u.%u, fix_status: %s, fix_quality: %s",
@@ -113,12 +116,13 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 			utc->millisecond % 1000U
 			);
 
-		if (gnss_position_cb) {
-			gnss_position_cb(nav_data, info->hdop);
-		}
 	}
 
 	memcpy(&gnss_data, data, sizeof(struct gnss_data));
+
+	if (info->fix_status != GNSS_FIX_STATUS_NO_FIX && gnss_position_cb) {
+		gnss_position_cb(&gnss_data.nav_data, gnss_data.info.hdop);
+	}
 }
 
 GNSS_DATA_CALLBACK_DEFINE(GNSS_DEVICE, gnss_data_cb);

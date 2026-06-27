@@ -50,6 +50,19 @@ If the device is silent, toggle DTR in `picocom` with `Ctrl-A` then `t`. The cap
 - Broad `sensor attr_get lis3dh@19` is not useful on this firmware: the shell iterates many generic channels/attributes and the driver returns `-88` (`ENOTSUP`) for unsupported attributes, producing a large amount of noise. Prefer targeted reads or firmware-side sensor configuration.
 - `settings -h` shows list/read/write/delete support. `lora -h` exposes raw LoRa radio config/send/recv/test commands, not LoRaWAN application commands.
 
+2026-06-27 issue #3 bench finding:
+
+- A stationary bench run with Zephyr `v4.4.1` and the read-only console showed GNSS-reported speed spikes above `5 m/s` while the accelerometer stayed close to gravity with small vector deltas.
+- Those false speed reports were accompanied by large altitude jumps, despite good-looking satellite count and HDOP.
+- Do not trust GNSS speed alone for movement detection on this hardware. Prefer accelerometer-gated motion state and treat GNSS-only speed plus still acceleration plus altitude jumps as position drift.
+- The first adaptive policy now uses accelerometer polling, stationary/active/moving intervals, event-bit clearing, latest-sample GNSS callbacks, and a GNSS drift guard. Real moving-vehicle traces are still required for threshold tuning.
+
+2026-06-27 LoRa backend validation finding:
+
+- ChirpStack gateway-frame inspection is useful when application events are missing. It confirmed the current firmware's live RF packets reached a gateway even though they were not shown under the expected application device.
+- Application event history can validate payload decoding, but always confirm the firmware DevEUI / JoinEUI / AppKey match the ChirpStack device being inspected.
+- The current source still contains placeholder LoRaWAN identity constants in `include/app/lib/lorawan_node.h`; backend validation against a named ChirpStack device needs real provisioned credentials or a matching temporary ChirpStack device.
+
 ## Validation expectations
 
 - Use local builds and tests for fast feedback when hardware is unavailable.

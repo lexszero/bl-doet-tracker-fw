@@ -127,6 +127,52 @@ Console fix:
 - Validated two back-to-back helper sessions on 2026-06-27. Captures were fully printable and showed Zephyr boot, `DoET`, GNSS logs, LoRaWAN join, uplink confirmations, and no `FATAL`, `ASSERT`, or `modem_chat` markers.
 - Because the default firmware console is read-only, exit the helper with `Ctrl-C`. Existing SSH shells that loaded an older `tracker-console` alias may need `source ~/.bash_aliases`, a fresh SSH shell, or direct use of `/home/christian/bin/tracker-console`.
 
+Issue #3 adaptive uplink work:
+
+- `app/src/main.c` now has an initial movement-aware uplink policy for issue #3.
+- The LoRaWAN position payload format is unchanged: port `4`, packed `int32_t lat`, `int32_t lon`, and `uint16_t hdop`.
+- GNSS remains powered/hot; the policy changes when position fixes are sent, not GNSS power state.
+- The app polls the LIS2DH/LIS3DH accelerometer on each GNSS position event and classifies motion as `active`, `moving`, or `stationary`.
+- Uplink intervals are currently:
+  - moving: `10 s`;
+  - active/working: `30 s`;
+  - stationary heartbeat: `120 s`.
+- The first implementation exposed two important correctness fixes:
+  - `k_event_wait()` now clears GNSS event bits so the main loop does not keep re-processing stale position events.
+  - `lib/gnss/gnss.c` now copies the latest GNSS sample into `gnss_data` before posting the position callback.
+- GNSS fix gating skips invalid/no-fix positions, fewer than `4` satellites, or HDOP worse than `2.5`.
+- When the accelerometer is available and still, GNSS speed alone does not resume motion. This is intentional: stationary bench logs showed GNSS-reported speed spikes while acceleration stayed near gravity.
+- A drift guard suppresses GNSS-only speed/position use for `60 s` when the accelerometer is still and GNSS altitude jumps by more than `5 m` between fixes.
+- If the accelerometer is unavailable, the policy falls back to GNSS speed so the firmware still sends positions.
+
+Issue #3 bench validation:
+
+- The adaptive-uplink build was flashed to the remote tracker on 2026-06-27.
+- Artifact size remained `258048` bytes.
+- Final 190 second capture showed:
+  - Zephyr `v4.4.1` boot and app banner;
+  - accelerometer ready as `lis3dh@19`;
+  - LoRaWAN OTAA join success;
+  - no `FATAL`, `ASSERT`, or `modem_chat` markers;
+  - motion state changed from startup `active` to `stationary`;
+  - one startup position uplink after speed settled;
+  - one stationary heartbeat uplink about `120 s` later;
+  - later GNSS drift guard activation on a false GNSS speed/altitude jump without forcing active/moving state.
+- This validates the stationary bench case. A real moving/shaking vehicle test is still needed to tune thresholds and prove movement resumes `10 s`/`30 s` cadence as intended.
+
+LoRa backend observation:
+
+- ChirpStack access through the private bench path works. Keep hostnames, internal IPs, credentials, exact URLs, and device identifiers in `llm-wiki/private/`.
+- MQTT subscription attempts did not show useful Tracker_108 application events during this session. ChirpStack's gRPC API did work for application event and gateway-frame inspection.
+- ChirpStack application event history for the Lex-provided Tracker_108 device includes port `4` uplinks whose 10 byte payload decodes exactly as the firmware format: little-endian `int32_t lat`, `int32_t lon`, and `uint16_t hdop`.
+- The currently flashed firmware does **not** identify as that Tracker_108 device. Gateway-frame inspection of a live reset showed the current firmware JoinRequest uses the placeholder DevEUI / JoinEUI from `include/app/lib/lorawan_node.h`.
+- Live gateway frames confirmed the current firmware's LoRa packets are reaching the gateway:
+  - JoinRequest from the placeholder DevEUI;
+  - unconfirmed uplink on port `13` for the `de ad ca fe` boot marker;
+  - unconfirmed uplink on port `4` for the position payload.
+- Because the current firmware uses placeholder LoRaWAN identity values, current live uplinks should not be expected to appear under Lex's Tracker_108 application device until issue #2/settings/provisioning is addressed or the firmware is temporarily built with the Tracker_108 credentials.
+- The stock Tracker_108 decoder reports a codec error on the port `13` boot marker. If the boot marker stays, the ChirpStack decoder should ignore or handle non-position ports.
+
 Historical caveat:
 
 - Before the modern image was flashed, the remote tracker had a locally built `origin/dev/tracker` reference candidate from commit `2976538`.
@@ -136,12 +182,15 @@ Historical caveat:
 
 ## Next Best Steps
 
-1. Have the user test the current bench helper with `tracker-console`; it should reset the ESP32 and stream read-only UART logs. Exit with `Ctrl-C`.
-2. Keep the read-only UART log console unless interactive shell access is explicitly needed.
-3. Let the flashed read-only-console build run longer and capture whether it remains stable through repeated uplinks and any downlink activity.
-4. If an interactive shell is needed later, prefer a separate debug config or first try `CONFIG_SHELL_ECHO_STATUS=n`; do not reintroduce shell echo into the default firmware without retesting the bench console and DTR/RTS behavior.
-5. If Lex provides an original or known-good `zephyr.bin`, keep it for comparison, but it is no longer required just to prove the UART/reset path.
-6. After longer hardware behavior is understood, decide whether to keep evolving this codebase or start a cleaner minimal tracker app from scratch on Zephyr `v4.4.1`.
+1. Decide how to provision real LoRaWAN identity values. The current hardcoded placeholder DevEUI is enough to prove gateway RF receipt, but not enough to view current data under Lex's Tracker_108 device.
+2. For a quick backend validation, temporarily build with the Tracker_108 DevEUI / JoinEUI / AppKey in private/local config or create a matching temporary ChirpStack device for the placeholder identity.
+3. Update the ChirpStack decoder to handle or ignore port `13`, or remove the `de ad ca fe` boot marker before relying on the app event stream.
+4. Test the adaptive uplink policy on a physically moving tracker or by safely shaking/moving the bench device while watching `motion state:` and `position uplink:` logs.
+5. Tune `GNSS_ACTIVE_SPEED_MM_S`, `GNSS_MOVING_SPEED_MM_S`, `ACCEL_VECTOR_DELTA_MM_S2`, and the three interval constants from real movement traces.
+6. Keep the read-only UART log console unless interactive shell access is explicitly needed.
+7. Let the current build run longer and capture whether it remains stable through repeated stationary heartbeats, movement resumes, and any downlink activity.
+8. If an interactive shell is needed later, prefer a separate debug config or first try `CONFIG_SHELL_ECHO_STATUS=n`; do not reintroduce shell echo into the default firmware without retesting the bench console and DTR/RTS behavior.
+9. If Lex provides an original or known-good `zephyr.bin`, keep it for comparison, but it is no longer required just to prove the UART/reset path.
 
 ## Useful Local Commands
 

@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef void (*gnss_position_cb_t)();
+typedef void (*gnss_position_cb_t)(const struct navigation_data *nav_data, uint16_t hdop);
 
 int gnss_init(gnss_position_cb_t position_cb);
 
