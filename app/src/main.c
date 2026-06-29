@@ -31,6 +31,7 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_ACTIVE_INTERVAL_MS 30000
 #define POSITION_UPLINK_STATIONARY_INTERVAL_MS 120000
 #define POSITION_UPLINK_MOTION_RESUME_MIN_MS 3000
+#define POSITION_UPLINK_CONFIRMED_INTERVAL_MS 600000
 
 #define GNSS_GOOD_HDOP_MAX 2500
 #define GNSS_GOOD_SATELLITES_MIN 4
@@ -45,8 +46,9 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define MOTION_HOLD_MS 30000
 
 bool lorawan_joined = false;
-int64_t last_uplink_timestamp = 0;
-bool have_sent_position = false;
+static int64_t last_uplink_attempt_timestamp;
+static int64_t last_confirmed_uplink_timestamp;
+static bool have_attempted_position;
 static int64_t last_diagnostic_position_timestamp;
 static bool have_logged_diagnostic_position;
 
@@ -363,10 +365,14 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 					 uint32_t interval_ms,
 					 const struct accel_motion_sample *accel,
 					 bool resumed_motion, int send_ret,
-					 uint8_t result)
+					 uint8_t result,
+					 enum lorawan_message_type message_type)
 {
 	struct diagnostic_log_uplink_entry entry = {0};
+	struct lorawan_node_status lorawan_status;
 	uint32_t utc_packed = diagnostic_log_pack_utc(&gnss_data.utc);
+
+	lorawan_node_get_status(&lorawan_status);
 
 	entry.uptime_ms = i64_to_u32_saturated(now);
 	entry.utc_packed = utc_packed;
@@ -379,6 +385,8 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 	entry.motion_state = diagnostic_log_motion_state(state);
 	entry.result = result;
 	entry.satellites = u32_to_u8_saturated(gnss_data.info.satellites_cnt);
+	entry.downlink_rssi = lorawan_status.last_downlink_rssi;
+	entry.downlink_snr = lorawan_status.last_downlink_snr;
 	if (accel != NULL && accel->valid) {
 		entry.flags |= DIAGNOSTIC_LOG_FLAG_ACCEL_VALID;
 		if (accel->moving) {
@@ -394,10 +402,33 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 	if (utc_packed != 0U) {
 		entry.flags |= DIAGNOSTIC_LOG_FLAG_UTC_VALID;
 	}
+	if (lorawan_status.adr_enabled) {
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_ADR_ENABLED;
+	}
+	if (lorawan_status.datarate_valid) {
+		entry.lorawan_dr = (uint8_t)lorawan_status.datarate;
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_DR_VALID;
+	}
+	if (lorawan_status.last_downlink_valid) {
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_DOWNLINK_VALID;
+	}
+	if (message_type == LORAWAN_MSG_CONFIRMED) {
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_CONFIRMED;
+	}
 
 	(void)diagnostic_log_write_uplink(&entry);
 	last_diagnostic_position_timestamp = now;
 	have_logged_diagnostic_position = true;
+}
+
+static enum lorawan_message_type position_message_type(int64_t now)
+{
+	if (last_confirmed_uplink_timestamp == 0 ||
+	    now - last_confirmed_uplink_timestamp >= POSITION_UPLINK_CONFIRMED_INTERVAL_MS) {
+		return LORAWAN_MSG_CONFIRMED;
+	}
+
+	return LORAWAN_MSG_UNCONFIRMED;
 }
 
 static void tracker_motion_init(void)
@@ -445,8 +476,8 @@ int handle_event_gnss_position()
 	read_accel_motion(&accel);
 	current_motion = update_motion_state(&accel, now);
 	interval_ms = uplink_interval_ms_for_motion(current_motion);
-	resumed_motion = last_motion_resume_timestamp > last_uplink_timestamp &&
-			 (now - last_uplink_timestamp) >= POSITION_UPLINK_MOTION_RESUME_MIN_MS;
+	resumed_motion = last_motion_resume_timestamp > last_uplink_attempt_timestamp &&
+			 (now - last_uplink_attempt_timestamp) >= POSITION_UPLINK_MOTION_RESUME_MIN_MS;
 
 	if (!gnss_position_is_usable(&accel)) {
 		LOG_DBG("position skipped: weak or drifting fix (satellites=%u, hdop=%u.%03u, speed=%u.%03u)",
@@ -464,12 +495,13 @@ int handle_event_gnss_position()
 
 		log_position_uplink_decision(now, current_motion, interval_ms, &accel,
 					     false, -ENOTCONN,
-					     DIAGNOSTIC_LOG_UPLINK_NOT_JOINED);
+					     DIAGNOSTIC_LOG_UPLINK_NOT_JOINED,
+					     LORAWAN_MSG_UNCONFIRMED);
 		return 0;
 	}
 
-	if (have_sent_position && !resumed_motion &&
-	    now - last_uplink_timestamp < interval_ms) {
+	if (have_attempted_position && !resumed_motion &&
+	    now - last_uplink_attempt_timestamp < interval_ms) {
 		return 0;
 	}
 
@@ -483,23 +515,33 @@ int handle_event_gnss_position()
 		.lon = (int32_t)(gnss_data.nav_data.longitude >> 5),
 		.hdop = gnss_data.info.hdop
 	};
+	enum lorawan_message_type message_type = position_message_type(now);
 
-	int ret = lorawan_send(4, (uint8_t *)&msg, sizeof(msg), LORAWAN_MSG_UNCONFIRMED);
+	last_uplink_attempt_timestamp = now;
+	have_attempted_position = true;
+	if (message_type == LORAWAN_MSG_CONFIRMED) {
+		last_confirmed_uplink_timestamp = now;
+	}
+
+	int ret = lorawan_send(4, (uint8_t *)&msg, sizeof(msg), message_type);
 	if (ret < 0) {
-		LOG_ERR("lorawan_send failed: %d", ret);
+		LOG_ERR("position uplink failed: %d type=%s state=%s interval=%u ms",
+			ret, message_type == LORAWAN_MSG_CONFIRMED ? "confirmed" : "unconfirmed",
+			motion_state_name(current_motion), interval_ms);
 		log_position_uplink_decision(now, current_motion, interval_ms, &accel,
 					     resumed_motion, ret,
-					     DIAGNOSTIC_LOG_UPLINK_SEND_FAILED);
+					     DIAGNOSTIC_LOG_UPLINK_SEND_FAILED,
+					     message_type);
 		return ret;
 	}
 
 	log_position_uplink_decision(now, current_motion, interval_ms, &accel,
-				     resumed_motion, ret, DIAGNOSTIC_LOG_UPLINK_SENT);
+				     resumed_motion, ret, DIAGNOSTIC_LOG_UPLINK_SENT,
+				     message_type);
 
-	last_uplink_timestamp = now;
-	have_sent_position = true;
-	LOG_INF("position uplink: state=%s interval=%u ms speed=%u.%03u m/s hdop=%u.%03u satellites=%u",
+	LOG_INF("position uplink: state=%s type=%s interval=%u ms speed=%u.%03u m/s hdop=%u.%03u satellites=%u",
 		motion_state_name(current_motion),
+		message_type == LORAWAN_MSG_CONFIRMED ? "confirmed" : "unconfirmed",
 		interval_ms,
 		gnss_data.nav_data.speed / 1000, gnss_data.nav_data.speed % 1000,
 		gnss_data.info.hdop / 1000, gnss_data.info.hdop % 1000,

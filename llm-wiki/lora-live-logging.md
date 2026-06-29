@@ -10,6 +10,8 @@ scripts/dev/chirpstack_live_map.py
 
 It listens to ChirpStack application events for one device, decodes the current tracker port `4` payload, writes CSV/JSON/GeoJSON outputs, and serves a small Leaflet/OpenStreetMap live map.
 
+When ChirpStack includes RF metadata in the application event, the script also preserves gateway RSSI/SNR, frequency, spreading factor, bandwidth, and code rate. Firmware TX power is not currently visible through this receiver-side stream.
+
 The source-controlled script intentionally has no private defaults. Provide these through environment variables or a private wrapper:
 
 - `CHIRPSTACK_SERVER`

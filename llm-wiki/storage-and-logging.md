@@ -81,7 +81,9 @@ The firmware now includes `CONFIG_TRACKER_DIAGNOSTIC_LOG=y` by default. It appen
 
 It intentionally does not log every GNSS fix. At a 1 Hz GNSS rate, internal flash would fill too quickly and would add unnecessary erase/write churn.
 
-Each record is `40` bytes and includes:
+Record version `1` was `40` bytes. Record version `2` is `48` bytes and adds LoRaWAN link-observation fields.
+
+Each current v2 record includes:
 
 - sequence number;
 - boot uptime in milliseconds;
@@ -93,19 +95,23 @@ Each record is `40` bytes and includes:
 - motion state;
 - send result and return code;
 - satellite count;
-- flags for accelerometer validity/motion, drift guard, motion resume, and UTC validity.
+- flags for accelerometer validity/motion, drift guard, motion resume, and UTC validity;
+- LoRaWAN datarate when known;
+- ADR enabled/disabled state;
+- whether the application uplink was confirmed;
+- last downlink RSSI/SNR when a downlink callback has been observed.
 
-The `640 KiB` partition is split into `160` erase sectors of `4096` bytes. Each sector stores `102` records, leaving a small unused tail so records never cross sector boundaries. Total capacity is `16320` records.
+The `640 KiB` partition is split into `160` erase sectors of `4096` bytes. With current v2 records, each sector stores `85` records, leaving a small unused tail so records never cross sector boundaries. Total capacity is `13600` records.
 
 Approximate retention:
 
 | Position-send cadence | Retention |
 | --- | ---: |
-| 10 s moving cadence | 45.3 hours / 1.9 days |
-| 30 s active cadence | 5.7 days |
-| 120 s stationary cadence | 22.7 days |
+| 10 s moving cadence | 37.8 hours / 1.6 days |
+| 30 s active cadence | 4.7 days |
+| 120 s stationary cadence | 18.9 days |
 
-The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it.
+The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it. The host decoder can read both v1 and v2 records.
 
 ## Dump and Decode Workflow
 

@@ -75,6 +75,19 @@ def best_rx(body: dict[str, Any]) -> dict[str, Any]:
     return max(rx_info, key=lambda rx: rx.get("snr", -999))
 
 
+def tx_info(body: dict[str, Any]) -> dict[str, Any]:
+    return body.get("tx_info") or body.get("txInfo") or {}
+
+
+def tx_lora_modulation(tx: dict[str, Any]) -> dict[str, Any]:
+    modulation = tx.get("modulation") or {}
+    if not isinstance(modulation, dict):
+        return {}
+
+    lora = modulation.get("lora") or modulation.get("LoRa") or {}
+    return lora if isinstance(lora, dict) else {}
+
+
 def parse_uplink_point(body: dict[str, Any], dev_eui: str) -> dict[str, Any] | None:
     port = body_get(body, "f_port", "fPort")
     data_b64 = body.get("data")
@@ -88,6 +101,8 @@ def parse_uplink_point(body: dict[str, Any], dev_eui: str) -> dict[str, Any] | N
 
     lat, lon, hdop = decoded
     rx = best_rx(body)
+    tx = tx_info(body)
+    lora = tx_lora_modulation(tx)
     return {
         "received_at": utc_now(),
         "network_time": (body.get("time") or "").replace("+00:00", "Z"),
@@ -102,6 +117,10 @@ def parse_uplink_point(body: dict[str, Any], dev_eui: str) -> dict[str, Any] | N
         "rssi": rx.get("rssi"),
         "snr": rx.get("snr"),
         "gateway_id": rx.get("gateway_id") or rx.get("gatewayId") or "",
+        "frequency": body_get(tx, "frequency", "frequency"),
+        "spreading_factor": body_get(lora, "spreading_factor", "spreadingFactor"),
+        "bandwidth": body_get(lora, "bandwidth", "bandwidth"),
+        "code_rate": body_get(lora, "code_rate", "codeRate"),
     }
 
 
@@ -131,6 +150,10 @@ def write_outputs(out_dir: Path, points: list[dict[str, Any]]) -> None:
         "rssi",
         "snr",
         "gateway_id",
+        "frequency",
+        "spreading_factor",
+        "bandwidth",
+        "code_rate",
         "raw_hex",
     ]
     csv_path = out_dir / "positions.csv"
@@ -211,7 +234,8 @@ def write_index(out_dir: Path, title: str) -> None:
         lat: ${{point.lat}}<br>
         lon: ${{point.lon}}<br>
         hdop: ${{point.hdop}}<br>
-        rssi: ${{point.rssi ?? 'n/a'}} snr: ${{point.snr ?? 'n/a'}}
+        rssi: ${{point.rssi ?? 'n/a'}} snr: ${{point.snr ?? 'n/a'}}<br>
+        freq: ${{point.frequency ?? 'n/a'}} sf: ${{point.spreading_factor ?? 'n/a'}}
       `;
     }}
 

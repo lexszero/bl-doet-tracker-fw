@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
@@ -12,6 +14,10 @@
 
 LOG_MODULE_REGISTER(lorawan_node);
 
+static struct lorawan_node_status node_status = {
+	.last_downlink_rssi = INT16_MIN,
+};
+
 static void dl_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			const uint8_t *hex_data);
 
@@ -23,6 +29,12 @@ static struct lorawan_downlink_cb downlink_cb = {
 static void dl_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			const uint8_t *hex_data)
 {
+	node_status.last_downlink_valid = true;
+	node_status.last_downlink_flags = flags;
+	node_status.last_downlink_rssi = rssi;
+	node_status.last_downlink_snr = snr;
+	node_status.downlink_count++;
+
 	LOG_INF("Port %d, Pending %d, RSSI %ddB, SNR %ddBm, Time %d", port,
 		flags & LORAWAN_DATA_PENDING, rssi, snr, !!(flags & LORAWAN_TIME_UPDATED));
 	if (hex_data) {
@@ -33,6 +45,9 @@ static void dl_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, u
 static void lorwan_datarate_changed(enum lorawan_datarate dr)
 {
 	uint8_t unused, max_size;
+
+	node_status.datarate = dr;
+	node_status.datarate_valid = true;
 
 	lorawan_get_payload_sizes(&unused, &max_size);
 	LOG_INF("New Datarate: DR_%d, Max Payload %d", dr, max_size);
@@ -71,6 +86,15 @@ int lorawan_node_init(void)
 		return ret;
 	}
 
+	lorawan_enable_adr(false);
+	node_status.adr_enabled = false;
+	LOG_INF("LoRaWAN ADR disabled");
+
+	ret = lorawan_set_conf_msg_tries(3);
+	if (ret < 0) {
+		LOG_WRN("lorawan_set_conf_msg_tries failed: %d", ret);
+	}
+
 	lorawan_register_downlink_callback(&downlink_cb);
 	lorawan_register_dr_changed_callback(lorwan_datarate_changed);
 
@@ -105,4 +129,13 @@ int lorawan_node_join(void)
 	}
 
 	return 0;
+}
+
+void lorawan_node_get_status(struct lorawan_node_status *status)
+{
+	if (status == NULL) {
+		return;
+	}
+
+	*status = node_status;
 }

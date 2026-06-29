@@ -77,11 +77,39 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
   - after the first failure, the firmware retried much faster than the selected interval;
   - likely cause: `last_uplink_timestamp` is only updated on successful sends, so failed sends can retry on every GNSS event.
 
+## Current In-Progress RF/Retry Work
+
+- The firmware has been updated locally so failed position sends consume the selected uplink cadence slot instead of retrying on every GNSS event.
+- ADR is disabled at LoRaWAN start for now, matching the current moving-tracker hypothesis that ADR can leave the device with stale RF settings after moving away from the gateway.
+- Position uplinks now use a periodic confirmed message as a link check. The current interval is `600 s`; other position uplinks remain unconfirmed.
+- Diagnostic records are now version `2` and `48` bytes. New fields capture:
+  - current LoRaWAN datarate when the stack reports one;
+  - whether ADR was enabled;
+  - whether the uplink was confirmed;
+  - last downlink RSSI/SNR when a downlink callback has been observed.
+- Zephyr's public LoRaWAN API used here does not expose current TX power directly, so receiver-side RSSI/SNR plus datarate/ADR/downlink information is the current observable proxy.
+- The host diagnostic decoder was updated to read both old `40` byte v1 records and new `48` byte v2 records.
+- The ChirpStack live-map script now also preserves frequency and LoRa modulation metadata when the application event includes it.
+- Local validation completed:
+  - Python syntax checks passed;
+  - the updated decoder successfully decoded the existing `1394` record movement dump.
+- Docker Desktop was started and the Zephyr `v4.4.1` production build passed. The generated `zephyr.bin` size was `258048` bytes, SHA256 `224318CD425B0F648D7C0B7D7E4A361510FEC6325E3D45B8D00B6BF9E4A2036A`.
+- The RF/retry/ADR-observation image was flashed to the bench at app offset `0x1000`, preserving settings.
+- A 180 second post-flash console capture showed:
+  - normal boot;
+  - `LoRaWAN ADR disabled`;
+  - successful OTAA join;
+  - datarate callback `DR_0`;
+  - two downlink callbacks;
+  - one confirmed active position uplink;
+  - one unconfirmed stationary heartbeat;
+  - zero `FATAL`, `ASSERT`, `lorawan_send failed`, or `position uplink failed` markers.
+- A small diagnostic readback was attempted after the boot check, but SSH closed before the dump was copied. New v2 diagnostic records still need to be dumped and decoded after the next stable bench connection or movement run.
+
 ## Next Best Steps
 
-1. Fix send retry/backoff behavior so failed LoRaWAN sends are rate-limited.
-2. Rebuild and flash the production image.
-3. Run another movement test and decode the diagnostic log.
-4. Tune motion thresholds only after reviewing real movement traces.
-5. Decide later whether the LoRaWAN payload should include speed or whether speed should remain diagnostic-log-only.
-6. Keep public docs sanitized; keep bench/backend runbooks and personal agent state in ignored private notes.
+1. Run another movement test and decode the diagnostic log.
+2. Check whether send failures are now rate-limited and whether confirmed link checks produce downlink/RF evidence.
+3. Tune motion thresholds only after reviewing real movement traces.
+4. Decide later whether the LoRaWAN payload should include speed or whether speed should remain diagnostic-log-only.
+5. Keep public docs sanitized; keep bench/backend runbooks and personal agent state in ignored private notes.

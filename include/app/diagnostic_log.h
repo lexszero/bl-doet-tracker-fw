@@ -24,6 +24,11 @@ extern "C" {
 #define DIAGNOSTIC_LOG_FLAG_MOTION_RESUME (1U << 3)
 #define DIAGNOSTIC_LOG_FLAG_UTC_VALID (1U << 4)
 
+#define DIAGNOSTIC_LOG_LINK_FLAG_ADR_ENABLED (1U << 0)
+#define DIAGNOSTIC_LOG_LINK_FLAG_DR_VALID (1U << 1)
+#define DIAGNOSTIC_LOG_LINK_FLAG_DOWNLINK_VALID (1U << 2)
+#define DIAGNOSTIC_LOG_LINK_FLAG_CONFIRMED (1U << 3)
+
 struct diagnostic_log_uplink_entry {
 	uint32_t uptime_ms;
 	uint32_t utc_packed;
@@ -37,6 +42,10 @@ struct diagnostic_log_uplink_entry {
 	uint8_t result;
 	uint8_t satellites;
 	uint8_t flags;
+	uint8_t lorawan_dr;
+	uint8_t link_flags;
+	int16_t downlink_rssi;
+	int8_t downlink_snr;
 };
 
 int diagnostic_log_init(void);

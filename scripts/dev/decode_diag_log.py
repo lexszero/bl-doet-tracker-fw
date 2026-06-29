@@ -23,11 +23,13 @@ from typing import Iterable
 
 
 MAGIC = 0xD107
-VERSION = 1
-RECORD_SIZE = 40
+VERSION_V1 = 1
+VERSION_V2 = 2
+RECORD_SIZE_V1 = 40
+RECORD_SIZE_V2 = 48
 SECTOR_SIZE = 4096
-RECORDS_PER_SECTOR = SECTOR_SIZE // RECORD_SIZE
-RECORD_STRUCT = struct.Struct("<HBBIIIiiHHHhBBBBHH")
+RECORD_STRUCT_V1 = struct.Struct("<HBBIIIiiHHHhBBBBHH")
+RECORD_STRUCT_V2 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 
 MOTION_STATES = {
     0: "unknown",
@@ -48,9 +50,15 @@ FLAG_DRIFT_SUPPRESSED = 1 << 2
 FLAG_MOTION_RESUME = 1 << 3
 FLAG_UTC_VALID = 1 << 4
 
+LINK_FLAG_ADR_ENABLED = 1 << 0
+LINK_FLAG_DR_VALID = 1 << 1
+LINK_FLAG_DOWNLINK_VALID = 1 << 2
+LINK_FLAG_CONFIRMED = 1 << 3
+
 
 @dataclass(frozen=True)
 class Record:
+    record_version: int
     offset: int
     seq: int
     uptime_ms: int
@@ -65,6 +73,10 @@ class Record:
     result: int
     satellites: int
     flags: int
+    lorawan_dr: int | None = None
+    link_flags: int = 0
+    downlink_rssi: int | None = None
+    downlink_snr: int | None = None
 
     @property
     def lat_deg(self) -> float:
@@ -124,19 +136,20 @@ def decode_utc(value: int) -> str | None:
     return f"20{year:02d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
 
 
-def iter_record_offsets(size: int) -> Iterable[int]:
+def iter_record_offsets(size: int, record_size: int) -> Iterable[int]:
     sectors = size // SECTOR_SIZE
+    records_per_sector = SECTOR_SIZE // record_size
     for sector in range(sectors):
         sector_offset = sector * SECTOR_SIZE
-        for slot in range(RECORDS_PER_SECTOR):
-            offset = sector_offset + slot * RECORD_SIZE
-            if offset + RECORD_SIZE <= size:
+        for slot in range(records_per_sector):
+            offset = sector_offset + slot * record_size
+            if offset + record_size <= size:
                 yield offset
 
 
-def parse_record(raw: bytes, offset: int) -> Record | None:
-    chunk = raw[offset : offset + RECORD_SIZE]
-    if len(chunk) != RECORD_SIZE or chunk == b"\xff" * RECORD_SIZE:
+def parse_record_v1(raw: bytes, offset: int) -> Record | None:
+    chunk = raw[offset : offset + RECORD_SIZE_V1]
+    if len(chunk) != RECORD_SIZE_V1 or chunk == b"\xff" * RECORD_SIZE_V1:
         return None
 
     (
@@ -158,15 +171,16 @@ def parse_record(raw: bytes, offset: int) -> Record | None:
         flags,
         crc16,
         _reserved,
-    ) = RECORD_STRUCT.unpack(chunk)
+    ) = RECORD_STRUCT_V1.unpack(chunk)
 
-    if magic != MAGIC or version != VERSION or record_size != RECORD_SIZE:
+    if magic != MAGIC or version != VERSION_V1 or record_size != RECORD_SIZE_V1:
         return None
 
     if crc16_ccitt(chunk[:36]) != crc16:
         return None
 
     return Record(
+        record_version=version,
         offset=offset,
         seq=seq,
         uptime_ms=uptime_ms,
@@ -184,19 +198,92 @@ def parse_record(raw: bytes, offset: int) -> Record | None:
     )
 
 
+def parse_record_v2(raw: bytes, offset: int) -> Record | None:
+    chunk = raw[offset : offset + RECORD_SIZE_V2]
+    if len(chunk) != RECORD_SIZE_V2 or chunk == b"\xff" * RECORD_SIZE_V2:
+        return None
+
+    (
+        magic,
+        version,
+        record_size,
+        seq,
+        uptime_ms,
+        utc_packed,
+        latitude,
+        longitude,
+        speed_cm_s,
+        hdop,
+        interval_s,
+        send_ret,
+        motion_state,
+        result,
+        satellites,
+        flags,
+        lorawan_dr,
+        link_flags,
+        downlink_rssi,
+        downlink_snr,
+        _reserved0,
+        crc16,
+        _reserved,
+        _reserved1,
+    ) = RECORD_STRUCT_V2.unpack(chunk)
+
+    if magic != MAGIC or version != VERSION_V2 or record_size != RECORD_SIZE_V2:
+        return None
+
+    if crc16_ccitt(chunk[:42]) != crc16:
+        return None
+
+    return Record(
+        record_version=version,
+        offset=offset,
+        seq=seq,
+        uptime_ms=uptime_ms,
+        utc_packed=utc_packed,
+        latitude=latitude,
+        longitude=longitude,
+        speed_cm_s=speed_cm_s,
+        hdop=hdop,
+        interval_s=interval_s,
+        send_ret=send_ret,
+        motion_state=motion_state,
+        result=result,
+        satellites=satellites,
+        flags=flags,
+        lorawan_dr=lorawan_dr,
+        link_flags=link_flags,
+        downlink_rssi=downlink_rssi,
+        downlink_snr=downlink_snr,
+    )
+
+
 def parse_dump(path: Path) -> list[Record]:
     raw = path.read_bytes()
-    records = [
-        record
-        for offset in iter_record_offsets(len(raw))
-        if (record := parse_record(raw, offset)) is not None
-    ]
-    return sorted(records, key=lambda record: record.seq)
+    found: dict[tuple[int, int], Record] = {}
+
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V1):
+        if (record := parse_record_v1(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V2):
+        if (record := parse_record_v2(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
+    return sorted(found.values(), key=lambda record: (record.seq, record.record_version))
+
+
+def optional_int(value: int | None) -> str:
+    return "" if value is None else str(value)
 
 
 def record_to_row(record: Record) -> dict[str, object]:
     flags = record.flags
+    link_flags = record.link_flags
+    downlink_valid = bool(link_flags & LINK_FLAG_DOWNLINK_VALID)
     return {
+        "record_version": record.record_version,
         "seq": record.seq,
         "offset_hex": f"0x{record.offset:05x}",
         "uptime_ms": record.uptime_ms,
@@ -218,12 +305,21 @@ def record_to_row(record: Record) -> dict[str, object]:
         "motion_resume": bool(flags & FLAG_MOTION_RESUME),
         "utc_valid": bool(flags & FLAG_UTC_VALID),
         "flags_hex": f"0x{flags:02x}",
+        "lorawan_dr": optional_int(record.lorawan_dr) if link_flags & LINK_FLAG_DR_VALID else "",
+        "adr_enabled": bool(link_flags & LINK_FLAG_ADR_ENABLED),
+        "confirmed": bool(link_flags & LINK_FLAG_CONFIRMED),
+        "downlink_valid": downlink_valid,
+        "downlink_rssi": optional_int(record.downlink_rssi) if downlink_valid else "",
+        "downlink_snr": optional_int(record.downlink_snr) if downlink_valid else "",
+        "link_flags_hex": f"0x{link_flags:02x}",
     }
 
 
 def write_csv(records: list[Record], path: Path) -> None:
     rows = [record_to_row(record) for record in records]
-    fieldnames = list(rows[0].keys()) if rows else list(record_to_row(Record(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)).keys())
+    fieldnames = list(rows[0].keys()) if rows else list(
+        record_to_row(Record(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)).keys()
+    )
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -265,6 +361,12 @@ def write_html_map(records: list[Record], path: Path) -> None:
             "result": record.result_name,
             "satellites": record.satellites,
             "send_ret": record.send_ret,
+            "record_version": record.record_version,
+            "lorawan_dr": record.lorawan_dr if record.link_flags & LINK_FLAG_DR_VALID else None,
+            "adr_enabled": bool(record.link_flags & LINK_FLAG_ADR_ENABLED),
+            "confirmed": bool(record.link_flags & LINK_FLAG_CONFIRMED),
+            "downlink_rssi": record.downlink_rssi if record.link_flags & LINK_FLAG_DOWNLINK_VALID else None,
+            "downlink_snr": record.downlink_snr if record.link_flags & LINK_FLAG_DOWNLINK_VALID else None,
         }
         for record in records
     ]
@@ -345,7 +447,11 @@ def write_html_map(records: list[Record], path: Path) -> None:
         Interval: ${{point.interval_s}} s<br>
         State: ${{point.motion_state}}<br>
         Result: ${{point.result}} (${{point.send_ret}})<br>
-        Satellites: ${{point.satellites}}
+        Type: ${{point.confirmed ? 'confirmed' : 'unconfirmed'}}<br>
+        DR: ${{point.lorawan_dr ?? 'n/a'}} ADR: ${{point.adr_enabled ? 'on' : 'off'}}<br>
+        Downlink: ${{point.downlink_rssi ?? 'n/a'}} dBm / ${{point.downlink_snr ?? 'n/a'}} dB<br>
+        Satellites: ${{point.satellites}}<br>
+        Record v${{point.record_version}}
       `;
       L.circleMarker([point.lat, point.lon], {{
         radius: 5,
