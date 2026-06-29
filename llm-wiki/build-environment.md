@@ -10,7 +10,7 @@ Current direction:
 
 - Use local Docker for builds.
 - Use remote hardware benches only for flashing, serial logs, and hardware validation.
-- Keep private bench access notes under ignored local paths such as `llm-wiki/private/`.
+- Keep shared private bench access notes under ignored local paths such as `llm-wiki/private/dev-group/`.
 - Avoid committing build artifacts and local Zephyr workspaces.
 
 ## Zephyr Version
@@ -58,6 +58,7 @@ settings only and does not run the normal tracker GNSS/LoRaWAN loop.
 - Removed stale networking/Wi-Fi stack assignments while networking remains disabled.
 - 2026-06-27: the default issue #2 settings/provisioning build passed and remained `258048` bytes. The separate `app/provisioning.conf` shell build passed at `323584` bytes.
 - 2026-06-27: the board switched from Zephyr's stock Espressif 4 MB AMP partition include to a repo-local layout with `1 MiB` `image-0` / `image-1` slots and a new `640 KiB` `diagnostic-log` partition. The existing `storage` partition remains at `0x3b0000` / `192 KiB` to preserve provisioned settings. Clean default and provisioning builds both passed after this change, and the production image was flashed to hardware with settings load, OTAA join, and position uplink confirmed.
+- 2026-06-27: a compact circular diagnostic log was added on the `diagnostic-log` partition for LoRaWAN position uplink decisions. Default production build passed at `258048` bytes, SHA256 `6283DF36A54FFDBE7D5E61AF884E9567BE330DE080E98CD6DA4DEC6863686C37`. The provisioning-shell build also passed at `323584` bytes, SHA256 `F81FB7F4A85795A1EB21C859A1570A63BCFD053F1D3E74D1F1514A6E6A8AD40C`.
 
 ## Compatibility Path
 

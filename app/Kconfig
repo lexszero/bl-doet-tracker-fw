@@ -20,3 +20,12 @@ config TRACKER_PROVISIONING_MODE
 	  Disable the normal tracker runtime so a shell build can safely write
 	  persistent provisioning settings without the LoRaWAN stack joining or
 	  updating its NVM state at the same time.
+
+config TRACKER_DIAGNOSTIC_LOG
+	bool "Tracker diagnostic flash log"
+	default y
+	depends on FLASH && FLASH_MAP
+	help
+	  Store compact binary diagnostic records in the diagnostic-log flash
+	  partition. This is intended for field testing and offline decoding, not
+	  for raw text log storage.

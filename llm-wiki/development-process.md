@@ -14,7 +14,7 @@ The project operator needs to provide one of these before agents can validate ha
 ## Remote test bench
 
 - Do not commit hostnames, ports, usernames, private key paths, device serial numbers, or access commands for a live bench.
-- Keep bench-specific access notes in ignored local files, for example under `llm-wiki/private/`.
+- Keep bench-specific access notes in ignored local files, for example under `llm-wiki/private/dev-group/`.
 - Practical workflow: build firmware locally or in CI, copy the build artifacts to the remote host, and use the remote host only for flashing, serial console, and hardware validation.
 
 Do not assume credentials, protocols, device paths, or deployment commands until the project operator provides them through an approved private channel.

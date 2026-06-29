@@ -4,6 +4,8 @@
  */
 
 #include <stdlib.h>
+#include <stdint.h>
+#include <errno.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -14,6 +16,7 @@
 #include <app_version.h>
 
 #include <app/drivers/led_status.h>
+#include <app/diagnostic_log.h>
 #include <app/lib/gnss.h>
 #include <app/lib/led_status.h>
 #include <app/lib/lorawan_node.h>
@@ -44,6 +47,8 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 bool lorawan_joined = false;
 int64_t last_uplink_timestamp = 0;
 bool have_sent_position = false;
+static int64_t last_diagnostic_position_timestamp;
+static bool have_logged_diagnostic_position;
 
 #define EV_GNSS_POSITION 1
 K_EVENT_DEFINE(events);
@@ -100,6 +105,53 @@ static const char *motion_state_name(enum tracker_motion_state state)
 	default:
 		return "unknown";
 	}
+}
+
+static uint8_t diagnostic_log_motion_state(enum tracker_motion_state state)
+{
+	switch (state) {
+	case TRACKER_MOTION_STATIONARY:
+		return DIAGNOSTIC_LOG_MOTION_STATIONARY;
+	case TRACKER_MOTION_ACTIVE:
+		return DIAGNOSTIC_LOG_MOTION_ACTIVE;
+	case TRACKER_MOTION_MOVING:
+		return DIAGNOSTIC_LOG_MOTION_MOVING;
+	case TRACKER_MOTION_UNKNOWN:
+	default:
+		return DIAGNOSTIC_LOG_MOTION_UNKNOWN;
+	}
+}
+
+static uint16_t u32_to_u16_saturated(uint32_t value)
+{
+	return value > UINT16_MAX ? UINT16_MAX : (uint16_t)value;
+}
+
+static uint8_t u32_to_u8_saturated(uint32_t value)
+{
+	return value > UINT8_MAX ? UINT8_MAX : (uint8_t)value;
+}
+
+static uint32_t i64_to_u32_saturated(int64_t value)
+{
+	if (value <= 0) {
+		return 0U;
+	}
+
+	return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
+}
+
+static int16_t int_to_i16_saturated(int value)
+{
+	if (value > INT16_MAX) {
+		return INT16_MAX;
+	}
+
+	if (value < INT16_MIN) {
+		return INT16_MIN;
+	}
+
+	return (int16_t)value;
 }
 
 static int64_t abs64(int64_t value)
@@ -307,6 +359,47 @@ static uint32_t uplink_interval_ms_for_motion(enum tracker_motion_state state)
 	}
 }
 
+static void log_position_uplink_decision(int64_t now, enum tracker_motion_state state,
+					 uint32_t interval_ms,
+					 const struct accel_motion_sample *accel,
+					 bool resumed_motion, int send_ret,
+					 uint8_t result)
+{
+	struct diagnostic_log_uplink_entry entry = {0};
+	uint32_t utc_packed = diagnostic_log_pack_utc(&gnss_data.utc);
+
+	entry.uptime_ms = i64_to_u32_saturated(now);
+	entry.utc_packed = utc_packed;
+	entry.latitude = (int32_t)(gnss_data.nav_data.latitude >> 5);
+	entry.longitude = (int32_t)(gnss_data.nav_data.longitude >> 5);
+	entry.speed_cm_s = u32_to_u16_saturated((gnss_data.nav_data.speed + 5U) / 10U);
+	entry.hdop = u32_to_u16_saturated(gnss_data.info.hdop);
+	entry.interval_s = u32_to_u16_saturated(interval_ms / 1000U);
+	entry.send_ret = int_to_i16_saturated(send_ret);
+	entry.motion_state = diagnostic_log_motion_state(state);
+	entry.result = result;
+	entry.satellites = u32_to_u8_saturated(gnss_data.info.satellites_cnt);
+	if (accel != NULL && accel->valid) {
+		entry.flags |= DIAGNOSTIC_LOG_FLAG_ACCEL_VALID;
+		if (accel->moving) {
+			entry.flags |= DIAGNOSTIC_LOG_FLAG_ACCEL_MOVING;
+		}
+	}
+	if (gnss_drift_suppressed) {
+		entry.flags |= DIAGNOSTIC_LOG_FLAG_DRIFT_SUPPRESSED;
+	}
+	if (resumed_motion) {
+		entry.flags |= DIAGNOSTIC_LOG_FLAG_MOTION_RESUME;
+	}
+	if (utc_packed != 0U) {
+		entry.flags |= DIAGNOSTIC_LOG_FLAG_UTC_VALID;
+	}
+
+	(void)diagnostic_log_write_uplink(&entry);
+	last_diagnostic_position_timestamp = now;
+	have_logged_diagnostic_position = true;
+}
+
 static void tracker_motion_init(void)
 {
 	last_motion_timestamp = k_uptime_get();
@@ -343,9 +436,6 @@ void pack_angle(int64_t a, uint8_t *buf)
 
 int handle_event_gnss_position()
 {
-	if (!lorawan_joined)
-		return 0;
-
 	int64_t now = k_uptime_get();
 	struct accel_motion_sample accel;
 	enum tracker_motion_state current_motion;
@@ -363,6 +453,18 @@ int handle_event_gnss_position()
 			gnss_data.info.satellites_cnt,
 			gnss_data.info.hdop / 1000, gnss_data.info.hdop % 1000,
 			gnss_data.nav_data.speed / 1000, gnss_data.nav_data.speed % 1000);
+		return 0;
+	}
+
+	if (!lorawan_joined) {
+		if (have_logged_diagnostic_position &&
+		    now - last_diagnostic_position_timestamp < interval_ms) {
+			return 0;
+		}
+
+		log_position_uplink_decision(now, current_motion, interval_ms, &accel,
+					     false, -ENOTCONN,
+					     DIAGNOSTIC_LOG_UPLINK_NOT_JOINED);
 		return 0;
 	}
 
@@ -385,8 +487,14 @@ int handle_event_gnss_position()
 	int ret = lorawan_send(4, (uint8_t *)&msg, sizeof(msg), LORAWAN_MSG_UNCONFIRMED);
 	if (ret < 0) {
 		LOG_ERR("lorawan_send failed: %d", ret);
+		log_position_uplink_decision(now, current_motion, interval_ms, &accel,
+					     resumed_motion, ret,
+					     DIAGNOSTIC_LOG_UPLINK_SEND_FAILED);
 		return ret;
 	}
+
+	log_position_uplink_decision(now, current_motion, interval_ms, &accel,
+				     resumed_motion, ret, DIAGNOSTIC_LOG_UPLINK_SENT);
 
 	last_uplink_timestamp = now;
 	have_sent_position = true;
@@ -420,6 +528,11 @@ int main(void)
 		while (1) {
 			k_sleep(K_SECONDS(60));
 		}
+	}
+
+	ret = diagnostic_log_init();
+	if (ret != 0) {
+		LOG_WRN("diagnostic log disabled: %d", ret);
 	}
 
 	gnss_init(gnss_position_cb);

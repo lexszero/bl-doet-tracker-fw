@@ -11,5 +11,6 @@ project(app LANGUAGES C)
 
 target_sources(app PRIVATE
     src/main.c
+    src/diagnostic_log.c
     src/settings.c
 )

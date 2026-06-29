@@ -8,6 +8,8 @@ These rules are for AI agents and humans using the LLM wiki as a shared memory l
 - Keep this wiki concise. Link to source files instead of copying their contents.
 - Update the wiki when adding new subsystems, hardware assumptions, build workflows, or test workflows.
 - Do not record guesses as facts. Mark uncertain items as known gaps.
+- Respect [documentation boundaries](documentation-boundaries.md): tracked docs are public/GitHub-safe, shared operational secrets go under `llm-wiki/private/dev-group/`, and local agent-only state goes under `llm-wiki/private/personal-agent/`.
+- Never copy private hostnames, credentials, internal IPs, exact device IDs, key paths, or local tunnel state from ignored notes into tracked files.
 
 ## Code-change discipline
 
