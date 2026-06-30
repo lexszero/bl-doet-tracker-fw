@@ -51,6 +51,7 @@ RESULTS = {
     1: "sent",
     2: "send_failed",
     3: "not_joined",
+    4: "no_fix",
 }
 
 FLAG_ACCEL_VALID = 1 << 0
@@ -582,13 +583,16 @@ def write_geojson(records: list[Record], path: Path) -> None:
     features = []
     for record in records:
         row = record_to_row(record)
+        geometry = None
+        if record.result_name != "no_fix":
+            geometry = {
+                "type": "Point",
+                "coordinates": [record.lon_deg, record.lat_deg],
+            }
         features.append(
             {
                 "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [record.lon_deg, record.lat_deg],
-                },
+                "geometry": geometry,
                 "properties": row,
             }
         )
@@ -670,6 +674,7 @@ def write_html_map(records: list[Record], path: Path) -> None:
       <div><span class="dot" style="background:#16a34a"></span>stationary</div>
       <div><span class="dot" style="background:#dc2626"></span>send failed</div>
       <div><span class="dot" style="background:#7c3aed"></span>not joined</div>
+      <div><span class="dot" style="background:#6b7280"></span>no GPS fix / heartbeat</div>
     </div>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -692,6 +697,7 @@ def write_html_map(records: list[Record], path: Path) -> None:
 
     const latLngs = [];
     for (const point of points) {{
+      if (point.result === 'no_fix') continue;
       if (!Number.isFinite(point.lat) || !Number.isFinite(point.lon)) continue;
       latLngs.push([point.lat, point.lon]);
       const popup = `

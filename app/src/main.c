@@ -35,6 +35,7 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_MOTION_RESUME_MIN_MS 3000
 #define POSITION_UPLINK_CONFIRMED_INTERVAL_MS 600000
 #define POSITION_UPLINK_FAILURES_BEFORE_REJOIN 3
+#define DIAGNOSTIC_HEARTBEAT_INTERVAL_MS POSITION_UPLINK_STATIONARY_INTERVAL_MS
 
 #define LORAWAN_JOIN_RETRY_MIN_MS 15000
 #define LORAWAN_JOIN_RETRY_MAX_MS 300000
@@ -605,6 +606,46 @@ static void handle_event_gnss_position(void)
 	led_status_off(LED_B);
 }
 
+static bool diagnostic_heartbeat_due(int64_t now)
+{
+	if (!have_logged_diagnostic_position) {
+		return now >= DIAGNOSTIC_HEARTBEAT_INTERVAL_MS;
+	}
+
+	return now - last_diagnostic_position_timestamp >= DIAGNOSTIC_HEARTBEAT_INTERVAL_MS;
+}
+
+static void handle_diagnostic_heartbeat(void)
+{
+	int64_t now = k_uptime_get();
+	struct accel_motion_sample accel;
+	enum tracker_motion_state current_motion = TRACKER_MOTION_UNKNOWN;
+
+	if (!diagnostic_heartbeat_due(now)) {
+		return;
+	}
+
+	read_accel_motion(&accel);
+	if (accel.valid) {
+		current_motion = accel.moving ?
+				 TRACKER_MOTION_ACTIVE :
+				 TRACKER_MOTION_STATIONARY;
+	}
+
+	log_position_uplink_decision(now, current_motion,
+				     DIAGNOSTIC_HEARTBEAT_INTERVAL_MS, &accel,
+				     false, -ENODATA,
+				     DIAGNOSTIC_LOG_UPLINK_NO_FIX,
+				     LORAWAN_MSG_UNCONFIRMED);
+
+	LOG_INF("diagnostic heartbeat: no usable GNSS position (fix=%d quality=%d satellites=%u hdop=%u.%03u)",
+		gnss_data.info.fix_status,
+		gnss_data.info.fix_quality,
+		gnss_data.info.satellites_cnt,
+		gnss_data.info.hdop / 1000,
+		gnss_data.info.hdop % 1000);
+}
+
 static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 {
 	bool initialized = false;
@@ -718,6 +759,8 @@ int main(void)
 		if (ev & EV_GNSS_POSITION) {
 			handle_event_gnss_position();
 		}
+
+		handle_diagnostic_heartbeat();
 	}
 
 	return 0;
