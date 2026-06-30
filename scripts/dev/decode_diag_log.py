@@ -25,11 +25,20 @@ from typing import Iterable
 MAGIC = 0xD107
 VERSION_V1 = 1
 VERSION_V2 = 2
+VERSION_V3 = 3
+VERSION_V4 = 4
+VERSION_V5 = 5
 RECORD_SIZE_V1 = 40
 RECORD_SIZE_V2 = 48
+RECORD_SIZE_V3 = 48
+RECORD_SIZE_V4 = 48
+RECORD_SIZE_V5 = 48
 SECTOR_SIZE = 4096
 RECORD_STRUCT_V1 = struct.Struct("<HBBIIIiiHHHhBBBBHH")
 RECORD_STRUCT_V2 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
+RECORD_STRUCT_V3 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
+RECORD_STRUCT_V4 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
+RECORD_STRUCT_V5 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 
 MOTION_STATES = {
     0: "unknown",
@@ -55,6 +64,9 @@ LINK_FLAG_DR_VALID = 1 << 1
 LINK_FLAG_DOWNLINK_VALID = 1 << 2
 LINK_FLAG_CONFIRMED = 1 << 3
 
+POWER_FLAG_BATTERY_VALID = 1 << 0
+POWER_FLAG_BATTERY_GPIO34_VALID = 1 << 1
+
 
 @dataclass(frozen=True)
 class Record:
@@ -77,6 +89,9 @@ class Record:
     link_flags: int = 0
     downlink_rssi: int | None = None
     downlink_snr: int | None = None
+    power_flags: int = 0
+    battery_mv: int | None = None
+    battery_gpio34_mv: int | None = None
 
     @property
     def lat_deg(self) -> float:
@@ -259,6 +274,200 @@ def parse_record_v2(raw: bytes, offset: int) -> Record | None:
     )
 
 
+def parse_record_v3(raw: bytes, offset: int) -> Record | None:
+    chunk = raw[offset : offset + RECORD_SIZE_V3]
+    if len(chunk) != RECORD_SIZE_V3 or chunk == b"\xff" * RECORD_SIZE_V3:
+        return None
+
+    (
+        magic,
+        version,
+        record_size,
+        seq,
+        uptime_ms,
+        utc_packed,
+        latitude,
+        longitude,
+        speed_cm_s,
+        hdop,
+        interval_s,
+        send_ret,
+        motion_state,
+        result,
+        satellites,
+        flags,
+        lorawan_dr,
+        link_flags,
+        downlink_rssi,
+        downlink_snr,
+        power_flags,
+        battery_mv,
+        crc16,
+        _reserved,
+    ) = RECORD_STRUCT_V3.unpack(chunk)
+
+    if magic != MAGIC or version != VERSION_V3 or record_size != RECORD_SIZE_V3:
+        return None
+
+    if crc16_ccitt(chunk[:44]) != crc16:
+        return None
+
+    return Record(
+        record_version=version,
+        offset=offset,
+        seq=seq,
+        uptime_ms=uptime_ms,
+        utc_packed=utc_packed,
+        latitude=latitude,
+        longitude=longitude,
+        speed_cm_s=speed_cm_s,
+        hdop=hdop,
+        interval_s=interval_s,
+        send_ret=send_ret,
+        motion_state=motion_state,
+        result=result,
+        satellites=satellites,
+        flags=flags,
+        lorawan_dr=lorawan_dr,
+        link_flags=link_flags,
+        downlink_rssi=downlink_rssi,
+        downlink_snr=downlink_snr,
+        power_flags=power_flags,
+        battery_mv=battery_mv if power_flags & POWER_FLAG_BATTERY_VALID else None,
+    )
+
+
+def parse_record_v4(raw: bytes, offset: int) -> Record | None:
+    chunk = raw[offset : offset + RECORD_SIZE_V4]
+    if len(chunk) != RECORD_SIZE_V4 or chunk == b"\xff" * RECORD_SIZE_V4:
+        return None
+
+    (
+        magic,
+        version,
+        record_size,
+        seq,
+        uptime_ms,
+        utc_packed,
+        latitude,
+        longitude,
+        speed_cm_s,
+        hdop,
+        interval_s,
+        send_ret,
+        motion_state,
+        result,
+        satellites,
+        flags,
+        lorawan_dr,
+        link_flags,
+        downlink_rssi,
+        downlink_snr,
+        power_flags,
+        battery_mv,
+        battery_gpio34_mv,
+        crc16,
+    ) = RECORD_STRUCT_V4.unpack(chunk)
+
+    if magic != MAGIC or version != VERSION_V4 or record_size != RECORD_SIZE_V4:
+        return None
+
+    if crc16_ccitt(chunk[:46]) != crc16:
+        return None
+
+    return Record(
+        record_version=version,
+        offset=offset,
+        seq=seq,
+        uptime_ms=uptime_ms,
+        utc_packed=utc_packed,
+        latitude=latitude,
+        longitude=longitude,
+        speed_cm_s=speed_cm_s,
+        hdop=hdop,
+        interval_s=interval_s,
+        send_ret=send_ret,
+        motion_state=motion_state,
+        result=result,
+        satellites=satellites,
+        flags=flags,
+        lorawan_dr=lorawan_dr,
+        link_flags=link_flags,
+        downlink_rssi=downlink_rssi,
+        downlink_snr=downlink_snr,
+        power_flags=power_flags,
+        battery_mv=battery_mv if power_flags & POWER_FLAG_BATTERY_VALID else None,
+        battery_gpio34_mv=(
+            battery_gpio34_mv
+            if power_flags & POWER_FLAG_BATTERY_GPIO34_VALID
+            else None
+        ),
+    )
+
+
+def parse_record_v5(raw: bytes, offset: int) -> Record | None:
+    chunk = raw[offset : offset + RECORD_SIZE_V5]
+    if len(chunk) != RECORD_SIZE_V5 or chunk == b"\xff" * RECORD_SIZE_V5:
+        return None
+
+    (
+        magic,
+        version,
+        record_size,
+        seq,
+        uptime_ms,
+        utc_packed,
+        latitude,
+        longitude,
+        speed_cm_s,
+        hdop,
+        interval_s,
+        send_ret,
+        motion_state,
+        result,
+        satellites,
+        flags,
+        lorawan_dr,
+        link_flags,
+        downlink_rssi,
+        downlink_snr,
+        power_flags,
+        battery_mv,
+        crc16,
+        _reserved,
+    ) = RECORD_STRUCT_V5.unpack(chunk)
+
+    if magic != MAGIC or version != VERSION_V5 or record_size != RECORD_SIZE_V5:
+        return None
+
+    if crc16_ccitt(chunk[:44]) != crc16:
+        return None
+
+    return Record(
+        record_version=version,
+        offset=offset,
+        seq=seq,
+        uptime_ms=uptime_ms,
+        utc_packed=utc_packed,
+        latitude=latitude,
+        longitude=longitude,
+        speed_cm_s=speed_cm_s,
+        hdop=hdop,
+        interval_s=interval_s,
+        send_ret=send_ret,
+        motion_state=motion_state,
+        result=result,
+        satellites=satellites,
+        flags=flags,
+        lorawan_dr=lorawan_dr,
+        link_flags=link_flags,
+        downlink_rssi=downlink_rssi,
+        downlink_snr=downlink_snr,
+        power_flags=power_flags,
+        battery_mv=battery_mv if power_flags & POWER_FLAG_BATTERY_VALID else None,
+    )
+
+
 def parse_dump(path: Path) -> list[Record]:
     raw = path.read_bytes()
     found: dict[tuple[int, int], Record] = {}
@@ -271,6 +480,18 @@ def parse_dump(path: Path) -> list[Record]:
         if (record := parse_record_v2(raw, offset)) is not None:
             found[(record.offset, record.record_version)] = record
 
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V3):
+        if (record := parse_record_v3(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V4):
+        if (record := parse_record_v4(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V5):
+        if (record := parse_record_v5(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
     return sorted(found.values(), key=lambda record: (record.seq, record.record_version))
 
 
@@ -278,10 +499,34 @@ def optional_int(value: int | None) -> str:
     return "" if value is None else str(value)
 
 
+def battery_gpio35_mv(record: Record) -> int | None:
+    if record.record_version in (VERSION_V3, VERSION_V4):
+        if record.power_flags & POWER_FLAG_BATTERY_VALID:
+            return record.battery_mv
+    return None
+
+
+def battery_gpio34_mv(record: Record) -> int | None:
+    if record.record_version == VERSION_V4:
+        if record.power_flags & POWER_FLAG_BATTERY_GPIO34_VALID:
+            return record.battery_gpio34_mv
+    if record.record_version >= VERSION_V5:
+        if record.power_flags & POWER_FLAG_BATTERY_VALID:
+            return record.battery_mv
+    return None
+
+
+def canonical_battery_mv(record: Record) -> int | None:
+    return battery_gpio34_mv(record)
+
+
 def record_to_row(record: Record) -> dict[str, object]:
     flags = record.flags
     link_flags = record.link_flags
     downlink_valid = bool(link_flags & LINK_FLAG_DOWNLINK_VALID)
+    canonical_battery = canonical_battery_mv(record)
+    gpio35_battery = battery_gpio35_mv(record)
+    gpio34_battery = battery_gpio34_mv(record)
     return {
         "record_version": record.record_version,
         "seq": record.seq,
@@ -312,6 +557,13 @@ def record_to_row(record: Record) -> dict[str, object]:
         "downlink_rssi": optional_int(record.downlink_rssi) if downlink_valid else "",
         "downlink_snr": optional_int(record.downlink_snr) if downlink_valid else "",
         "link_flags_hex": f"0x{link_flags:02x}",
+        "battery_valid": canonical_battery is not None,
+        "battery_mv": optional_int(canonical_battery),
+        "battery_gpio35_valid": gpio35_battery is not None,
+        "battery_gpio35_mv": optional_int(gpio35_battery),
+        "battery_gpio34_valid": gpio34_battery is not None,
+        "battery_gpio34_mv": optional_int(gpio34_battery),
+        "power_flags_hex": f"0x{record.power_flags:02x}",
     }
 
 
@@ -367,6 +619,9 @@ def write_html_map(records: list[Record], path: Path) -> None:
             "confirmed": bool(record.link_flags & LINK_FLAG_CONFIRMED),
             "downlink_rssi": record.downlink_rssi if record.link_flags & LINK_FLAG_DOWNLINK_VALID else None,
             "downlink_snr": record.downlink_snr if record.link_flags & LINK_FLAG_DOWNLINK_VALID else None,
+            "battery_mv": canonical_battery_mv(record),
+            "battery_gpio35_mv": battery_gpio35_mv(record),
+            "battery_gpio34_mv": battery_gpio34_mv(record),
         }
         for record in records
     ]
@@ -450,6 +705,9 @@ def write_html_map(records: list[Record], path: Path) -> None:
         Type: ${{point.confirmed ? 'confirmed' : 'unconfirmed'}}<br>
         DR: ${{point.lorawan_dr ?? 'n/a'}} ADR: ${{point.adr_enabled ? 'on' : 'off'}}<br>
         Downlink: ${{point.downlink_rssi ?? 'n/a'}} dBm / ${{point.downlink_snr ?? 'n/a'}} dB<br>
+        Battery: ${{point.battery_mv ?? 'n/a'}} mV<br>
+        Battery GPIO35 candidate: ${{point.battery_gpio35_mv ?? 'n/a'}} mV<br>
+        Battery GPIO34: ${{point.battery_gpio34_mv ?? 'n/a'}} mV<br>
         Satellites: ${{point.satellites}}<br>
         Record v${{point.record_version}}
       `;
@@ -493,13 +751,29 @@ def main() -> int:
         default=None,
         help="Output directory. Defaults to '<dump stem>-decoded' next to the dump.",
     )
+    parser.add_argument(
+        "--record-version",
+        type=int,
+        action="append",
+        choices=[VERSION_V1, VERSION_V2, VERSION_V3, VERSION_V4, VERSION_V5],
+        default=None,
+        help=(
+            "Only emit records with this diagnostic record version. "
+            "Can be passed multiple times."
+        ),
+    )
     args = parser.parse_args()
 
     dump_path = args.dump
     out_dir = args.out_dir or dump_path.with_name(f"{dump_path.stem}-decoded")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    records = parse_dump(dump_path)
+    all_records = parse_dump(dump_path)
+    records = [
+        record
+        for record in all_records
+        if args.record_version is None or record.record_version in args.record_version
+    ]
     csv_path = out_dir / "diagnostic-log.csv"
     geojson_path = out_dir / "diagnostic-log.geojson"
     html_path = out_dir / "diagnostic-log-map.html"
@@ -509,6 +783,9 @@ def main() -> int:
     write_html_map(records, html_path)
 
     print(f"decoded_records={len(records)}")
+    if args.record_version is not None:
+        print(f"raw_decoded_records={len(all_records)}")
+        print(f"record_versions={','.join(str(version) for version in args.record_version)}")
     print(f"csv={csv_path}")
     print(f"geojson={geojson_path}")
     print(f"html_map={html_path}")

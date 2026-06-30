@@ -29,6 +29,9 @@ extern "C" {
 #define DIAGNOSTIC_LOG_LINK_FLAG_DOWNLINK_VALID (1U << 2)
 #define DIAGNOSTIC_LOG_LINK_FLAG_CONFIRMED (1U << 3)
 
+#define DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_VALID (1U << 0)
+#define DIAGNOSTIC_LOG_BATTERY_MV_INVALID UINT16_MAX
+
 struct diagnostic_log_uplink_entry {
 	uint32_t uptime_ms;
 	uint32_t utc_packed;
@@ -46,6 +49,8 @@ struct diagnostic_log_uplink_entry {
 	uint8_t link_flags;
 	int16_t downlink_rssi;
 	int8_t downlink_snr;
+	uint8_t power_flags;
+	uint16_t battery_mv;
 };
 
 int diagnostic_log_init(void);

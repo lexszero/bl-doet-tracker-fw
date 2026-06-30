@@ -11,12 +11,14 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <app_version.h>
 
 #include <app/drivers/led_status.h>
 #include <app/diagnostic_log.h>
+#include <app/power_monitor.h>
 #include <app/lib/gnss.h>
 #include <app/lib/led_status.h>
 #include <app/lib/lorawan_node.h>
@@ -32,6 +34,12 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_STATIONARY_INTERVAL_MS 120000
 #define POSITION_UPLINK_MOTION_RESUME_MIN_MS 3000
 #define POSITION_UPLINK_CONFIRMED_INTERVAL_MS 600000
+#define POSITION_UPLINK_FAILURES_BEFORE_REJOIN 3
+
+#define LORAWAN_JOIN_RETRY_MIN_MS 15000
+#define LORAWAN_JOIN_RETRY_MAX_MS 300000
+#define LORAWAN_LINK_THREAD_STACK_SIZE 4096
+#define LORAWAN_LINK_THREAD_PRIORITY 7
 
 #define GNSS_GOOD_HDOP_MAX 2500
 #define GNSS_GOOD_SATELLITES_MIN 4
@@ -45,7 +53,8 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define ACCEL_VECTOR_DELTA_MM_S2 1500
 #define MOTION_HOLD_MS 30000
 
-bool lorawan_joined = false;
+static atomic_t lorawan_joined;
+static atomic_t consecutive_position_send_failures;
 static int64_t last_uplink_attempt_timestamp;
 static int64_t last_confirmed_uplink_timestamp;
 static bool have_attempted_position;
@@ -54,6 +63,10 @@ static bool have_logged_diagnostic_position;
 
 #define EV_GNSS_POSITION 1
 K_EVENT_DEFINE(events);
+K_THREAD_STACK_DEFINE(lorawan_link_thread_stack, LORAWAN_LINK_THREAD_STACK_SIZE);
+
+static struct k_thread lorawan_link_thread_data;
+static k_tid_t lorawan_link_thread_id;
 
 #if DT_NODE_HAS_STATUS(DT_ALIAS(accel_0), okay)
 static const struct device *const accel_dev = DEVICE_DT_GET(DT_ALIAS(accel_0));
@@ -93,6 +106,37 @@ struct msg_up_position {
 	int32_t lon;
 	uint16_t hdop;
 } __attribute__((packed));
+
+static bool lorawan_is_joined(void)
+{
+	return atomic_get(&lorawan_joined) != 0;
+}
+
+static void lorawan_set_joined(bool joined)
+{
+	atomic_set(&lorawan_joined, joined ? 1 : 0);
+}
+
+static void lorawan_note_position_send_success(void)
+{
+	atomic_set(&consecutive_position_send_failures, 0);
+}
+
+static void lorawan_note_position_send_failure(int ret)
+{
+	atomic_val_t failures;
+
+	failures = atomic_inc(&consecutive_position_send_failures) + 1;
+	if (failures < POSITION_UPLINK_FAILURES_BEFORE_REJOIN) {
+		return;
+	}
+
+	if (lorawan_is_joined()) {
+		LOG_WRN("LoRaWAN link marked down after %d consecutive position send failures (last %d)",
+			(int)failures, ret);
+		lorawan_set_joined(false);
+	}
+}
 
 static const char *motion_state_name(enum tracker_motion_state state)
 {
@@ -371,6 +415,7 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 	struct diagnostic_log_uplink_entry entry = {0};
 	struct lorawan_node_status lorawan_status;
 	uint32_t utc_packed = diagnostic_log_pack_utc(&gnss_data.utc);
+	uint16_t battery_mv;
 
 	lorawan_node_get_status(&lorawan_status);
 
@@ -387,6 +432,12 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 	entry.satellites = u32_to_u8_saturated(gnss_data.info.satellites_cnt);
 	entry.downlink_rssi = lorawan_status.last_downlink_rssi;
 	entry.downlink_snr = lorawan_status.last_downlink_snr;
+	if (tracker_power_monitor_read_battery_mv(&battery_mv) == 0) {
+		entry.power_flags |= DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_VALID;
+		entry.battery_mv = battery_mv;
+	} else {
+		entry.battery_mv = DIAGNOSTIC_LOG_BATTERY_MV_INVALID;
+	}
 	if (accel != NULL && accel->valid) {
 		entry.flags |= DIAGNOSTIC_LOG_FLAG_ACCEL_VALID;
 		if (accel->moving) {
@@ -465,7 +516,7 @@ void pack_angle(int64_t a, uint8_t *buf)
 	}
 }
 
-int handle_event_gnss_position()
+static void handle_event_gnss_position(void)
 {
 	int64_t now = k_uptime_get();
 	struct accel_motion_sample accel;
@@ -484,25 +535,25 @@ int handle_event_gnss_position()
 			gnss_data.info.satellites_cnt,
 			gnss_data.info.hdop / 1000, gnss_data.info.hdop % 1000,
 			gnss_data.nav_data.speed / 1000, gnss_data.nav_data.speed % 1000);
-		return 0;
+		return;
 	}
 
-	if (!lorawan_joined) {
+	if (!lorawan_is_joined()) {
 		if (have_logged_diagnostic_position &&
 		    now - last_diagnostic_position_timestamp < interval_ms) {
-			return 0;
+			return;
 		}
 
 		log_position_uplink_decision(now, current_motion, interval_ms, &accel,
 					     false, -ENOTCONN,
 					     DIAGNOSTIC_LOG_UPLINK_NOT_JOINED,
 					     LORAWAN_MSG_UNCONFIRMED);
-		return 0;
+		return;
 	}
 
 	if (have_attempted_position && !resumed_motion &&
 	    now - last_uplink_attempt_timestamp < interval_ms) {
-		return 0;
+		return;
 	}
 
 	/*
@@ -519,9 +570,6 @@ int handle_event_gnss_position()
 
 	last_uplink_attempt_timestamp = now;
 	have_attempted_position = true;
-	if (message_type == LORAWAN_MSG_CONFIRMED) {
-		last_confirmed_uplink_timestamp = now;
-	}
 
 	int ret = lorawan_send(4, (uint8_t *)&msg, sizeof(msg), message_type);
 	if (ret < 0) {
@@ -532,7 +580,13 @@ int handle_event_gnss_position()
 					     resumed_motion, ret,
 					     DIAGNOSTIC_LOG_UPLINK_SEND_FAILED,
 					     message_type);
-		return ret;
+		lorawan_note_position_send_failure(ret);
+		return;
+	}
+
+	lorawan_note_position_send_success();
+	if (message_type == LORAWAN_MSG_CONFIRMED) {
+		last_confirmed_uplink_timestamp = now;
 	}
 
 	log_position_uplink_decision(now, current_motion, interval_ms, &accel,
@@ -549,8 +603,72 @@ int handle_event_gnss_position()
 	led_status_on(LED_B);
 	k_sleep(K_MSEC(1000));
 	led_status_off(LED_B);
+}
 
-	return 0;
+static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
+{
+	bool initialized = false;
+	uint32_t retry_delay_ms = LORAWAN_JOIN_RETRY_MIN_MS;
+
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+
+	while (1) {
+		int ret;
+
+		if (!initialized) {
+			LOG_INF("LoRaWAN init attempt");
+			ret = lorawan_node_init();
+			if (ret != 0) {
+				LOG_WRN("LoRaWAN init failed: %d; retry in %u ms",
+					ret, retry_delay_ms);
+				k_sleep(K_MSEC(retry_delay_ms));
+				retry_delay_ms = MIN(retry_delay_ms * 2U,
+						     LORAWAN_JOIN_RETRY_MAX_MS);
+				continue;
+			}
+
+			initialized = true;
+			retry_delay_ms = LORAWAN_JOIN_RETRY_MIN_MS;
+			LOG_INF("LoRaWAN initialized");
+		}
+
+		if (lorawan_is_joined()) {
+			k_sleep(K_SECONDS(1));
+			continue;
+		}
+
+		LOG_INF("LoRaWAN join attempt");
+		led_status_blink_continuous(LED_B, 100, 100, 3, 0);
+
+		ret = lorawan_node_join();
+		if (ret == 0) {
+			lorawan_set_joined(true);
+			atomic_set(&consecutive_position_send_failures, 0);
+			retry_delay_ms = LORAWAN_JOIN_RETRY_MIN_MS;
+
+			LOG_INF("LoRaWAN joined");
+			led_status_on(LED_B);
+			k_sleep(K_MSEC(500));
+			led_status_off(LED_B);
+			led_status_on(LED_G);
+			k_sleep(K_MSEC(500));
+			led_status_off(LED_G);
+			continue;
+		}
+
+		LOG_WRN("LoRaWAN join failed: %d; retry in %u ms", ret, retry_delay_ms);
+		led_status_on(LED_B);
+		k_sleep(K_MSEC(500));
+		led_status_off(LED_B);
+		led_status_on(LED_R);
+		k_sleep(K_MSEC(500));
+		led_status_off(LED_R);
+
+		k_sleep(K_MSEC(retry_delay_ms));
+		retry_delay_ms = MIN(retry_delay_ms * 2U, LORAWAN_JOIN_RETRY_MAX_MS);
+	}
 }
 
 
@@ -577,48 +695,26 @@ int main(void)
 		LOG_WRN("diagnostic log disabled: %d", ret);
 	}
 
+	ret = tracker_power_monitor_init();
+	if (ret != 0) {
+		LOG_WRN("power monitor disabled: %d", ret);
+	}
+
 	gnss_init(gnss_position_cb);
 	tracker_motion_init();
 	led_status_blink_once(LED_G, 100, 100, 3);
-	lorawan_node_init();
+
+	lorawan_link_thread_id = k_thread_create(&lorawan_link_thread_data,
+						 lorawan_link_thread_stack,
+						 K_THREAD_STACK_SIZEOF(lorawan_link_thread_stack),
+						 lorawan_link_thread,
+						 NULL, NULL, NULL,
+						 K_PRIO_PREEMPT(LORAWAN_LINK_THREAD_PRIORITY),
+						 0, K_NO_WAIT);
+	(void)k_thread_name_set(lorawan_link_thread_id, "lorawan_link");
 
 	while (1) {
-		if (!lorawan_joined) {
-			led_status_blink_continuous(LED_B, 100, 100, 3, 0);
-			ret = lorawan_node_join();
-			if (ret == 0) {
-				lorawan_joined = true;
-				led_status_on(LED_B);
-				k_sleep(K_MSEC(500));
-				led_status_off(LED_B);
-				led_status_on(LED_G);
-				k_sleep(K_MSEC(500));
-				led_status_off(LED_G);
-
-				uint8_t msg[] = {0xde, 0xad, 0xca, 0xfe};
-				int ret = lorawan_send(13, msg, sizeof(msg), LORAWAN_MSG_UNCONFIRMED);
-				if (ret < 0) {
-					LOG_ERR("lorawan_send failed: %d", ret);
-					return ret;
-				}
-
-				led_status_on(LED_B);
-				k_sleep(K_MSEC(1000));
-				led_status_off(LED_B);
-
-			} else {
-				led_status_on(LED_B);
-				k_sleep(K_MSEC(500));
-				led_status_off(LED_B);
-				led_status_on(LED_R);
-				k_sleep(K_MSEC(500));
-				led_status_off(LED_R);
-			}
-
-			continue;
-		}
-
-		uint32_t ev = k_event_wait(&events, 0xFFF, true, K_MSEC(50));
+		uint32_t ev = k_event_wait(&events, 0xFFF, true, K_SECONDS(1));
 		if (ev & EV_GNSS_POSITION) {
 			handle_event_gnss_position();
 		}

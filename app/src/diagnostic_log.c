@@ -14,7 +14,7 @@
 LOG_MODULE_REGISTER(diagnostic_log, CONFIG_APP_LOG_LEVEL);
 
 #define DIAGNOSTIC_LOG_MAGIC 0xd107U
-#define DIAGNOSTIC_LOG_VERSION 2U
+#define DIAGNOSTIC_LOG_VERSION 5U
 #define DIAGNOSTIC_LOG_RECORD_SIZE 48U
 #define DIAGNOSTIC_LOG_SECTOR_SIZE 4096U
 
@@ -39,10 +39,10 @@ struct diagnostic_log_record {
 	uint8_t link_flags;
 	int16_t downlink_rssi;
 	int8_t downlink_snr;
-	uint8_t reserved0;
+	uint8_t power_flags;
+	uint16_t battery_mv;
 	uint16_t crc16;
 	uint16_t reserved;
-	uint16_t reserved1;
 } __attribute__((packed));
 
 BUILD_ASSERT(sizeof(struct diagnostic_log_record) == DIAGNOSTIC_LOG_RECORD_SIZE);
@@ -257,6 +257,8 @@ int diagnostic_log_write_uplink(const struct diagnostic_log_uplink_entry *entry)
 	record.link_flags = entry->link_flags;
 	record.downlink_rssi = entry->downlink_rssi;
 	record.downlink_snr = entry->downlink_snr;
+	record.power_flags = entry->power_flags;
+	record.battery_mv = entry->battery_mv;
 	record.crc16 = diagnostic_log_crc16((const uint8_t *)&record,
 					    offsetof(struct diagnostic_log_record, crc16));
 
