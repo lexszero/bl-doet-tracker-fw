@@ -31,6 +31,8 @@ extern "C" {
 #define DIAGNOSTIC_LOG_LINK_FLAG_CONFIRMED (1U << 3)
 
 #define DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_VALID (1U << 0)
+#define DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_PIN_VALID (1U << 1)
+#define DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_SATURATED (1U << 2)
 #define DIAGNOSTIC_LOG_BATTERY_MV_INVALID UINT16_MAX
 
 struct diagnostic_log_uplink_entry {
@@ -52,6 +54,7 @@ struct diagnostic_log_uplink_entry {
 	int8_t downlink_snr;
 	uint8_t power_flags;
 	uint16_t battery_mv;
+	uint16_t battery_pin_mv;
 };
 
 int diagnostic_log_init(void);

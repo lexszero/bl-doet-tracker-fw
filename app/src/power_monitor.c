@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -18,6 +19,7 @@ LOG_MODULE_REGISTER(power_monitor, CONFIG_APP_LOG_LEVEL);
 #define BATTERY_DIVIDER_NUMERATOR \
 	(BATTERY_DIVIDER_HIGH_KOHM + BATTERY_DIVIDER_LOW_KOHM)
 #define BATTERY_DIVIDER_DENOMINATOR BATTERY_DIVIDER_LOW_KOHM
+#define BATTERY_ADC_SATURATED_PIN_MV 2500
 
 #if DT_NODE_HAS_STATUS(BATTERY_ADC_NODE, okay) && DT_NODE_EXISTS(BATTERY_ADC_CHANNEL_NODE)
 static const struct adc_dt_spec battery_adc = {
@@ -65,7 +67,7 @@ int tracker_power_monitor_init(void)
 #endif
 }
 
-int tracker_power_monitor_read_battery_mv(uint16_t *battery_mv)
+int tracker_power_monitor_read_battery_sample(struct tracker_battery_sample *sample)
 {
 #if DT_NODE_HAS_STATUS(BATTERY_ADC_NODE, okay) && DT_NODE_EXISTS(BATTERY_ADC_CHANNEL_NODE)
 	int16_t raw_sample = 0;
@@ -77,11 +79,13 @@ int tracker_power_monitor_read_battery_mv(uint16_t *battery_mv)
 	};
 	int ret;
 
-	if (battery_mv == NULL) {
+	if (sample == NULL) {
 		return -EINVAL;
 	}
 
-	*battery_mv = TRACKER_BATTERY_MV_INVALID;
+	memset(sample, 0, sizeof(*sample));
+	sample->battery_mv = TRACKER_BATTERY_MV_INVALID;
+	sample->pin_mv = TRACKER_BATTERY_MV_INVALID;
 
 	if (!battery_ready) {
 		return -ENODEV;
@@ -97,10 +101,26 @@ int tracker_power_monitor_read_battery_mv(uint16_t *battery_mv)
 		return ret;
 	}
 
+	if (raw_sample < 0) {
+		return -ERANGE;
+	}
+	sample->raw = (uint16_t)raw_sample;
+	sample->raw_valid = true;
+
 	pin_mv = raw_sample;
 	ret = adc_raw_to_millivolts_dt(&battery_adc, &pin_mv);
 	if (ret != 0) {
 		return ret;
+	}
+	if (pin_mv < 0 || pin_mv > UINT16_MAX) {
+		return -ERANGE;
+	}
+
+	sample->pin_mv = (uint16_t)pin_mv;
+	sample->pin_mv_valid = true;
+	if (pin_mv >= BATTERY_ADC_SATURATED_PIN_MV) {
+		sample->saturated = true;
+		return 0;
 	}
 
 	scaled_mv = ((int64_t)pin_mv * BATTERY_DIVIDER_NUMERATOR +
@@ -110,12 +130,36 @@ int tracker_power_monitor_read_battery_mv(uint16_t *battery_mv)
 		return -ERANGE;
 	}
 
-	*battery_mv = (uint16_t)scaled_mv;
+	sample->battery_mv = (uint16_t)scaled_mv;
+	sample->battery_mv_valid = true;
 
 	return 0;
 #else
-	ARG_UNUSED(battery_mv);
+	ARG_UNUSED(sample);
 
 	return -ENODEV;
 #endif
+}
+
+int tracker_power_monitor_read_battery_mv(uint16_t *battery_mv)
+{
+	struct tracker_battery_sample sample;
+	int ret;
+
+	if (battery_mv == NULL) {
+		return -EINVAL;
+	}
+
+	*battery_mv = TRACKER_BATTERY_MV_INVALID;
+
+	ret = tracker_power_monitor_read_battery_sample(&sample);
+	if (ret != 0) {
+		return ret;
+	}
+	if (!sample.battery_mv_valid) {
+		return sample.saturated ? -ERANGE : -ENODATA;
+	}
+
+	*battery_mv = sample.battery_mv;
+	return 0;
 }

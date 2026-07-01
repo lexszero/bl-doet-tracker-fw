@@ -377,6 +377,17 @@ def write_index(out_dir: Path, title: str) -> None:
       margin-right: 5px;
       vertical-align: -1px;
     }}
+    .neighbourhood-label {{
+      background: rgba(17, 24, 39, 0.82);
+      border: 0;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 5px;
+      box-shadow: none;
+    }}
+    .neighbourhood-label::before {{ display: none; }}
   </style>
 </head>
 <body>
@@ -388,6 +399,8 @@ def write_index(out_dir: Path, title: str) -> None:
       <select id="deviceFilter" aria-label="Device filter">
         <option value="">All devices</option>
       </select>
+      <label><input type="checkbox" id="showNeighbourhoods" checked> Neighbourhoods</label>
+      <label><input type="checkbox" id="centerNeighbourhoods" checked> Power Hill at gateway</label>
     </div>
     <div id="summary" class="muted">Waiting for LoRaWAN positions...</div>
   </div>
@@ -398,23 +411,34 @@ def write_index(out_dir: Path, title: str) -> None:
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }}).addTo(map);
+    map.createPane('neighbourhoodPane');
+    map.getPane('neighbourhoodPane').style.zIndex = 350;
 
+    const neighbourhoodLayer = L.layerGroup().addTo(map);
     const pointLayer = L.layerGroup().addTo(map);
     let lines = [];
     let fitted = false;
+    let neighbourhoodGeoJson = null;
     const recentOnly = document.getElementById('recentOnly');
     const deviceFilter = document.getElementById('deviceFilter');
+    const showNeighbourhoods = document.getElementById('showNeighbourhoods');
+    const centerNeighbourhoods = document.getElementById('centerNeighbourhoods');
+    const neighbourhoodAnchor = {{
+      featureName: 'Power Hill',
+      target: {{ lat: 60.220101984, lon: 24.836646496 }}
+    }};
     const colors = ['#2563eb', '#dc2626', '#059669', '#7c3aed', '#c2410c', '#0891b2', '#be123c', '#4d7c0f'];
     const colorByDevice = new Map();
 
-    recentOnly.addEventListener('change', () => {{
+    function resetFitAndRefresh() {{
       fitted = false;
       refresh().catch(() => {{}});
-    }});
-    deviceFilter.addEventListener('change', () => {{
-      fitted = false;
-      refresh().catch(() => {{}});
-    }});
+    }}
+
+    recentOnly.addEventListener('change', resetFitAndRefresh);
+    deviceFilter.addEventListener('change', resetFitAndRefresh);
+    showNeighbourhoods.addEventListener('change', resetFitAndRefresh);
+    centerNeighbourhoods.addEventListener('change', resetFitAndRefresh);
 
     function escapeHtml(value) {{
       const replacements = {{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }};
@@ -526,6 +550,143 @@ def write_index(out_dir: Path, title: str) -> None:
       }}
     }}
 
+    async function loadNeighbourhoods() {{
+      neighbourhoodGeoJson = await fetchJson('neighbourhoods.geojson', null);
+    }}
+
+    function isLonLat(value) {{
+      return Array.isArray(value)
+        && value.length >= 2
+        && typeof value[0] === 'number'
+        && typeof value[1] === 'number';
+    }}
+
+    function walkCoordinates(coords, visitor) {{
+      if (isLonLat(coords)) {{
+        visitor(coords[0], coords[1]);
+        return;
+      }}
+      if (!Array.isArray(coords)) return;
+      for (const child of coords) walkCoordinates(child, visitor);
+    }}
+
+    function transformCoordinates(coords, transform) {{
+      if (isLonLat(coords)) {{
+        const [lon, lat, ...rest] = coords;
+        const [newLon, newLat] = transform(lon, lat);
+        return [newLon, newLat, ...rest];
+      }}
+      if (!Array.isArray(coords)) return coords;
+      return coords.map(child => transformCoordinates(child, transform));
+    }}
+
+    function geoJsonCenter(geojson, featureName = '') {{
+      let minLon = Infinity;
+      let minLat = Infinity;
+      let maxLon = -Infinity;
+      let maxLat = -Infinity;
+      const features = Array.isArray(geojson?.features) ? geojson.features : [];
+      const wantedName = String(featureName || '').toLowerCase();
+      for (const feature of features) {{
+        if (wantedName) {{
+          const props = (feature && feature.properties) || {{}};
+          const names = [props.name, props._name].map(value => String(value || '').toLowerCase());
+          if (!names.includes(wantedName)) continue;
+        }}
+        const geometry = feature?.geometry;
+        if (!geometry?.coordinates) continue;
+        walkCoordinates(geometry.coordinates, (lon, lat) => {{
+          minLon = Math.min(minLon, lon);
+          minLat = Math.min(minLat, lat);
+          maxLon = Math.max(maxLon, lon);
+          maxLat = Math.max(maxLat, lat);
+        }});
+      }}
+      if (!Number.isFinite(minLon) || !Number.isFinite(minLat)) return null;
+      return {{
+        lon: (minLon + maxLon) / 2,
+        lat: (minLat + maxLat) / 2
+      }};
+    }}
+
+    function translateLonLat(lon, lat, sourceCenter, targetCenter) {{
+      const metersPerDegreeLat = 111320;
+      const sourceLatRad = sourceCenter.lat * Math.PI / 180;
+      const targetLatRad = targetCenter.lat * Math.PI / 180;
+      const eastMeters = (lon - sourceCenter.lon) * metersPerDegreeLat * Math.cos(sourceLatRad);
+      const northMeters = (lat - sourceCenter.lat) * metersPerDegreeLat;
+      const targetCos = Math.max(0.1, Math.abs(Math.cos(targetLatRad)));
+      return [
+        targetCenter.lon + eastMeters / (metersPerDegreeLat * targetCos),
+        targetCenter.lat + northMeters / metersPerDegreeLat
+      ];
+    }}
+
+    function neighbourhoodName(feature) {{
+      const props = (feature && feature.properties) || {{}};
+      return props.name || props._name || props.type || 'Neighbourhood';
+    }}
+
+    function neighbourhoodPopup(feature) {{
+      const props = (feature && feature.properties) || {{}};
+      const details = [];
+      if (props.tagline) details.push(escapeHtml(props.tagline));
+      if (props.camping_allowed !== undefined) details.push(`camping: ${{escapeHtml(props.camping_allowed)}}`);
+      if (centerNeighbourhoods.checked) {{
+        details.push(`${{neighbourhoodAnchor.featureName}} anchored at gateway ${{neighbourhoodAnchor.target.lat.toFixed(9)}}, ${{neighbourhoodAnchor.target.lon.toFixed(9)}}`);
+      }}
+      return `<strong>${{escapeHtml(neighbourhoodName(feature))}}</strong>${{details.length ? '<br>' + details.join('<br>') : ''}}`;
+    }}
+
+    function translatedNeighbourhoodGeoJson() {{
+      if (!neighbourhoodGeoJson) return null;
+      if (!centerNeighbourhoods.checked) return neighbourhoodGeoJson;
+
+      const sourceCenter = geoJsonCenter(neighbourhoodGeoJson, neighbourhoodAnchor.featureName) || geoJsonCenter(neighbourhoodGeoJson);
+      if (!sourceCenter) return neighbourhoodGeoJson;
+      const targetCenter = neighbourhoodAnchor.target;
+
+      const clone = JSON.parse(JSON.stringify(neighbourhoodGeoJson));
+      for (const feature of clone.features || []) {{
+        if (!feature.geometry?.coordinates) continue;
+        feature.geometry.coordinates = transformCoordinates(
+          feature.geometry.coordinates,
+          (lon, lat) => translateLonLat(lon, lat, sourceCenter, targetCenter)
+        );
+      }}
+      return clone;
+    }}
+
+    function drawNeighbourhoods() {{
+      neighbourhoodLayer.clearLayers();
+      if (!showNeighbourhoods.checked || !neighbourhoodGeoJson) return null;
+
+      const geojson = translatedNeighbourhoodGeoJson();
+      if (!geojson) return null;
+
+      const layer = L.geoJSON(geojson, {{
+        pane: 'neighbourhoodPane',
+        style: () => ({{
+          color: '#111827',
+          weight: 2,
+          opacity: 0.82,
+          fillColor: '#f59e0b',
+          fillOpacity: 0.13,
+          dashArray: centerNeighbourhoods.checked ? '5 4' : undefined
+        }}),
+        onEachFeature: (feature, featureLayer) => {{
+          featureLayer.bindPopup(neighbourhoodPopup(feature));
+          featureLayer.bindTooltip(escapeHtml(neighbourhoodName(feature)), {{
+            sticky: true,
+            className: 'neighbourhood-label'
+          }});
+        }}
+      }}).addTo(neighbourhoodLayer);
+
+      const bounds = layer.getBounds();
+      return bounds.isValid() ? bounds : null;
+    }}
+
     function popup(point) {{
       return `
         <strong>${{escapeHtml(deviceLabel(point))}} fcnt ${{point.f_cnt ?? 'n/a'}}</strong><br>
@@ -574,8 +735,14 @@ def write_index(out_dir: Path, title: str) -> None:
         }}
       }}
 
-      if (latLngs.length && !fitted) {{
-        map.fitBounds(latLngs, {{ padding: [28, 28], maxZoom: 17 }});
+      const overlayBounds = drawNeighbourhoods();
+      let fitBounds = latLngs.length ? L.latLngBounds(latLngs) : null;
+      if (overlayBounds && overlayBounds.isValid()) {{
+        fitBounds = fitBounds ? fitBounds.extend(overlayBounds) : overlayBounds;
+      }}
+
+      if (fitBounds && fitBounds.isValid() && !fitted) {{
+        map.fitBounds(fitBounds, {{ padding: [28, 28], maxZoom: 17 }});
         fitted = true;
       }}
 
@@ -615,7 +782,7 @@ def write_index(out_dir: Path, title: str) -> None:
         : `${{latestEventLine || 'Waiting for LoRaWAN positions...'}}${{deviceSummaries}}`;
     }}
 
-    refresh().catch(() => {{}});
+    loadNeighbourhoods().finally(() => refresh().catch(() => {{}}));
     setInterval(() => refresh().catch(() => {{}}), 3000);
   </script>
 </body>

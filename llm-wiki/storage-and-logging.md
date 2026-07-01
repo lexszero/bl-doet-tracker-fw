@@ -1,6 +1,6 @@
 # Storage and Logging
 
-Last updated: 2026-06-27.
+Last updated: 2026-07-01.
 
 This page captures what is currently known about persistent storage and longer-term logging on the TrackerD-LS Zephyr firmware.
 
@@ -34,8 +34,9 @@ This page captures what is currently known about persistent storage and longer-t
 - The `diagnostic-log` partition is now used by the firmware for compact binary uplink-decision records.
 - The default firmware logs to UART with `CONFIG_LOG_BACKEND_UART=y`.
 - The default firmware does not enable `CONFIG_FILE_SYSTEM`, `CONFIG_DISK_ACCESS`, `CONFIG_SDHC`, `CONFIG_SDMMC_STACK`, `CONFIG_FAT_FILESYSTEM_ELM`, or LittleFS.
-- Battery-voltage monitoring uses ESP32 IO34 / ADC1 channel 6. The TrackerD-LS v1.3 schematic shows `BAT+` through `100k` to the ADC node and `470k` from that node to ground, so the firmware scales ADC pin voltage by `(100 + 470) / 470`.
-- The earlier v4 comparison image sampled both GPIO35 and GPIO34. Bench validation on 2026-06-29 showed GPIO35 around `169 mV` and GPIO34 around `3088 mV`; GPIO34 is the correct battery-voltage path.
+- Battery-voltage monitoring uses ESP32 IO34 / ADC1 channel 6. The TrackerD-LS v1.3 schematic shows `BAT+` through `100k` to the ADC node and `470k` from that node to ground, so the firmware scales ADC pin voltage by `(100 + 470) / 470` when the ADC conversion is in range.
+- The earlier v4 comparison image sampled both GPIO35 and GPIO34. Bench validation on 2026-06-29 showed GPIO35 near ground and GPIO34 in the battery-sense range; GPIO34 is the correct battery-voltage path.
+- A later external measurement around `4.09 V` showed that the current Zephyr ESP32 calibrated ADC conversion path can saturate before the firmware can report a true full battery voltage with this divider. Current diagnostic records therefore flag saturation and preserve the ADC pin millivolts instead of treating the clipped value as real battery voltage.
 
 ## Validation
 
@@ -83,9 +84,9 @@ The firmware now includes `CONFIG_TRACKER_DIAGNOSTIC_LOG=y` by default. It appen
 
 It intentionally does not log every GNSS fix. At a 1 Hz GNSS rate, internal flash would fill too quickly and would add unnecessary erase/write churn.
 
-Record version `1` was `40` bytes. Record version `2` is `48` bytes and adds LoRaWAN link-observation fields. Record version `3` stays `48` bytes and adds GPIO35 battery-voltage observation. Record version `4` stays `48` bytes and adds a GPIO34 battery-voltage candidate. Record version `5` stays `48` bytes and stores the confirmed IO34 battery voltage as the canonical `battery_mv` field.
+Record version `1` was `40` bytes. Record version `2` is `48` bytes and adds LoRaWAN link-observation fields. Record version `3` stays `48` bytes and adds GPIO35 battery-voltage observation. Record version `4` stays `48` bytes and adds a GPIO34 battery-voltage candidate. Record version `5` stays `48` bytes and stores IO34 battery voltage as the canonical `battery_mv` field when the ADC conversion is in range. Record version `6` stays `48` bytes and replaces the reserved tail with ADC pin millivolts plus an explicit saturation flag.
 
-Each current v5 record includes:
+Each current v6 record includes:
 
 - sequence number;
 - boot uptime in milliseconds;
@@ -101,10 +102,11 @@ Each current v5 record includes:
 - LoRaWAN datarate when known;
 - ADR enabled/disabled state;
 - whether the application uplink was confirmed;
-- last downlink RSSI/SNR when a downlink callback has been observed.
-- IO34 battery voltage in millivolts when the ADC read succeeds.
+- last downlink RSSI/SNR when a downlink callback has been observed;
+- IO34 battery voltage in millivolts when the ADC conversion is in range;
+- IO34 ADC pin millivolts and a saturation flag when the ADC conversion is clipped.
 
-The `640 KiB` partition is split into `160` erase sectors of `4096` bytes. With current v2 records, each sector stores `85` records, leaving a small unused tail so records never cross sector boundaries. Total capacity is `13600` records.
+The `640 KiB` partition is split into `160` erase sectors of `4096` bytes. With current `48` byte records, each sector stores `85` records, leaving a small unused tail so records never cross sector boundaries. Total capacity is `13600` records.
 
 Approximate retention:
 
@@ -114,7 +116,7 @@ Approximate retention:
 | 30 s active cadence | 4.7 days |
 | 120 s stationary cadence | 18.9 days |
 
-The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it. The host decoder can read v1, v2, v3, v4, and v5 records.
+The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it. The host decoder can read v1, v2, v3, v4, v5, and v6 records.
 
 ## Dump and Decode Workflow
 
@@ -129,6 +131,16 @@ Decode on the PC:
 ```powershell
 python scripts\dev\decode_diag_log.py diag-log.bin --out-dir diag-log-out
 ```
+
+To embed the neighbourhood-size overlay in the generated HTML map:
+
+```powershell
+python scripts\dev\decode_diag_log.py diag-log.bin --out-dir diag-log-out --neighbourhoods-geojson C:\Users\christianb\Downloads\neighbourhoods.geojson
+```
+
+If `--neighbourhoods-geojson` is omitted, the decoder also checks for `neighbourhoods.geojson` in the output directory or beside the dump file.
+
+When the overlay is present, the generated map defaults to anchoring the `Power Hill` neighbourhood around the gateway reference coordinate `60.220101984, 24.836646496` while preserving the overlay's approximate meter scale. Disable `Power Hill at gateway` in the map controls to view the GeoJSON in its original coordinates.
 
 The decoder writes:
 

@@ -1,6 +1,6 @@
 # Current Handoff
 
-Last updated: 2026-06-30.
+Last updated: 2026-07-01.
 
 This page is public/GitHub-safe. Shared operational bench/backend details belong in ignored development-group notes under `llm-wiki/private/dev-group/`; local machine and Codex process state belongs under `llm-wiki/private/personal-agent/`.
 
@@ -77,20 +77,24 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
   - after the first failure, the firmware retried much faster than the selected interval;
   - likely cause: `last_uplink_timestamp` is only updated on successful sends, so failed sends can retry on every GNSS event.
 
-## Current In-Progress RF/Retry Work
+## Current RF/Retry and Battery-Diagnostic Work
 
 - The firmware has been updated locally so failed position sends consume the selected uplink cadence slot instead of retrying on every GNSS event.
 - ADR is disabled at LoRaWAN start for now, matching the current moving-tracker hypothesis that ADR can leave the device with stale RF settings after moving away from the gateway.
 - Position uplinks now use a periodic confirmed message as a link check. The current interval is `600 s`; other position uplinks remain unconfirmed.
-- Local diagnostic records are now version `5` and `48` bytes. Fields capture:
+- Confirmed uplink timeouts no longer immediately mark the local LoRaWAN session down. Confirmed attempts are rate-limited by attempt time; hard repeated send failures still trigger rejoin handling.
+- If the local LoRaWAN link is marked down and cannot recover for `30 min`, the firmware performs a cold reboot to reset radio/MAC state.
+- Local diagnostic records are now version `6` and `48` bytes. Fields capture:
   - current LoRaWAN datarate when the stack reports one;
   - whether ADR was enabled;
   - whether the uplink was confirmed;
   - last downlink RSSI/SNR when a downlink callback has been observed;
-  - IO34 battery voltage in millivolts when the ADC read succeeds.
+  - IO34 battery voltage in millivolts when the ADC conversion is in range;
+  - IO34 ADC pin millivolts and a saturation flag when the ADC conversion is clipped.
 - Zephyr's public LoRaWAN API used here does not expose current TX power directly, so receiver-side RSSI/SNR plus datarate/ADR/downlink information is the current observable proxy.
-- Battery-voltage monitoring has been added as diagnostic-only data. Local code reads ESP32 IO34 / ADC1 channel 6 with the TrackerD-LS schematic's `100k` / `470k` divider scale; the LoRaWAN position payload is unchanged.
-- The host diagnostic decoder was updated to read old `40` byte v1 records and `48` byte v2/v3/v4/v5 records.
+- Battery-voltage monitoring is diagnostic-only data. Local code reads ESP32 IO34 / ADC1 channel 6 with the TrackerD-LS schematic's `100k` / `470k` divider scale when the ADC conversion is in range. A live external measurement around `4.09 V` showed the current calibrated ESP32 ADC conversion path can saturate; saturated readings are no longer reported as valid pack voltage.
+- The LoRaWAN position payload is unchanged.
+- The host diagnostic decoder was updated to read old `40` byte v1 records and `48` byte v2/v3/v4/v5/v6 records.
 - The ChirpStack live-map script now also preserves frequency and LoRa modulation metadata when the application event includes it.
 - The live-map script supports multiple DevEUIs, writes `latest_by_device.json` and `device_events.json`, colors devices separately, and defaults the browser view to decoded positions from the last 24 hours. `device_events.json` shows latest join/uplink events even when a payload is not decoded as a current firmware position point. The 24 hour filter is a view filter only; retained JSON/CSV/GeoJSON history still follows `--max-points`.
 - Local validation completed:
@@ -108,8 +112,9 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
   - one confirmed active position uplink;
   - zero `FATAL`, `ASSERT`, `lorawan_send failed`, or `position uplink failed` markers in the filtered capture.
 - New v4 diagnostic records were dumped and decoded. Two comparison records showed GPIO35 near ground and GPIO34 in the expected battery-sense range; GPIO34 is the useful battery-voltage path.
-- The TrackerD-LS v1.3 schematic confirms IO34 as the battery ADC path with a `100k` / `470k` divider. Local code has been cleaned up for diagnostic record version `5`: it reads only IO34 / ADC1 channel 6 and stores that value as canonical `battery_mv`. This v5 cleanup has not been flashed; the user explicitly requested not to flash yet.
-- The local IO34-only v5 build passed. Generated `zephyr.bin` size was `258048` bytes, SHA256 `7572505B062CAFDE3A09FB5DDA865D5D7DDE6091744A081EC80CD771BFB41E14`. This artifact remains unflashed.
+- The TrackerD-LS v1.3 schematic confirms IO34 as the battery ADC path with a `100k` / `470k` divider. The current v6 diagnostic format keeps `battery_mv` only for in-range readings and adds `battery_pin_mv` plus `battery_saturated`.
+- The local v6 build passed. Generated `zephyr.bin` size was `258048` bytes, SHA256 `C61929741707486AF4396A5B6941EB30551A9210226CD35BA79470C8231BD001`.
+- The v6 image has now been flashed to one provisioned development tracker, preserving settings. A short boot capture showed settings loaded, diagnostic log ready, IO34 battery monitor ready, ADR disabled, OTAA join success, and datarate `DR_0`. Exact device mapping and bench paths are private.
 - Additional stock TrackerD-LS units are now on the bench. Exact USB serials, ChirpStack mapping observations, stock backup details, and flash cautions are documented only in ignored private development-group notes.
 
 ## Next Best Steps

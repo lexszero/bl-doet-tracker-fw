@@ -19,7 +19,7 @@ import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 MAGIC = 0xD107
@@ -28,17 +28,20 @@ VERSION_V2 = 2
 VERSION_V3 = 3
 VERSION_V4 = 4
 VERSION_V5 = 5
+VERSION_V6 = 6
 RECORD_SIZE_V1 = 40
 RECORD_SIZE_V2 = 48
 RECORD_SIZE_V3 = 48
 RECORD_SIZE_V4 = 48
 RECORD_SIZE_V5 = 48
+RECORD_SIZE_V6 = 48
 SECTOR_SIZE = 4096
 RECORD_STRUCT_V1 = struct.Struct("<HBBIIIiiHHHhBBBBHH")
 RECORD_STRUCT_V2 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 RECORD_STRUCT_V3 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 RECORD_STRUCT_V4 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 RECORD_STRUCT_V5 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
+RECORD_STRUCT_V6 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 
 MOTION_STATES = {
     0: "unknown",
@@ -67,6 +70,8 @@ LINK_FLAG_CONFIRMED = 1 << 3
 
 POWER_FLAG_BATTERY_VALID = 1 << 0
 POWER_FLAG_BATTERY_GPIO34_VALID = 1 << 1
+POWER_FLAG_BATTERY_PIN_VALID = 1 << 1
+POWER_FLAG_BATTERY_SATURATED = 1 << 2
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,7 @@ class Record:
     power_flags: int = 0
     battery_mv: int | None = None
     battery_gpio34_mv: int | None = None
+    battery_pin_mv: int | None = None
 
     @property
     def lat_deg(self) -> float:
@@ -469,6 +475,74 @@ def parse_record_v5(raw: bytes, offset: int) -> Record | None:
     )
 
 
+def parse_record_v6(raw: bytes, offset: int) -> Record | None:
+    chunk = raw[offset : offset + RECORD_SIZE_V6]
+    if len(chunk) != RECORD_SIZE_V6 or chunk == b"\xff" * RECORD_SIZE_V6:
+        return None
+
+    (
+        magic,
+        version,
+        record_size,
+        seq,
+        uptime_ms,
+        utc_packed,
+        latitude,
+        longitude,
+        speed_cm_s,
+        hdop,
+        interval_s,
+        send_ret,
+        motion_state,
+        result,
+        satellites,
+        flags,
+        lorawan_dr,
+        link_flags,
+        downlink_rssi,
+        downlink_snr,
+        power_flags,
+        battery_mv,
+        battery_pin_mv,
+        crc16,
+    ) = RECORD_STRUCT_V6.unpack(chunk)
+
+    if magic != MAGIC or version != VERSION_V6 or record_size != RECORD_SIZE_V6:
+        return None
+
+    if crc16_ccitt(chunk[:46]) != crc16:
+        return None
+
+    return Record(
+        record_version=version,
+        offset=offset,
+        seq=seq,
+        uptime_ms=uptime_ms,
+        utc_packed=utc_packed,
+        latitude=latitude,
+        longitude=longitude,
+        speed_cm_s=speed_cm_s,
+        hdop=hdop,
+        interval_s=interval_s,
+        send_ret=send_ret,
+        motion_state=motion_state,
+        result=result,
+        satellites=satellites,
+        flags=flags,
+        lorawan_dr=lorawan_dr,
+        link_flags=link_flags,
+        downlink_rssi=downlink_rssi,
+        downlink_snr=downlink_snr,
+        power_flags=power_flags,
+        battery_mv=battery_mv if power_flags & POWER_FLAG_BATTERY_VALID else None,
+        battery_pin_mv=(
+            battery_pin_mv
+            if power_flags & POWER_FLAG_BATTERY_PIN_VALID
+            else None
+        ),
+    )
+
+
 def parse_dump(path: Path) -> list[Record]:
     raw = path.read_bytes()
     found: dict[tuple[int, int], Record] = {}
@@ -491,6 +565,10 @@ def parse_dump(path: Path) -> list[Record]:
 
     for offset in iter_record_offsets(len(raw), RECORD_SIZE_V5):
         if (record := parse_record_v5(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V6):
+        if (record := parse_record_v6(raw, offset)) is not None:
             found[(record.offset, record.record_version)] = record
 
     return sorted(found.values(), key=lambda record: (record.seq, record.record_version))
@@ -521,6 +599,19 @@ def canonical_battery_mv(record: Record) -> int | None:
     return battery_gpio34_mv(record)
 
 
+def battery_pin_mv(record: Record) -> int | None:
+    if record.record_version >= VERSION_V6:
+        if record.power_flags & POWER_FLAG_BATTERY_PIN_VALID:
+            return record.battery_pin_mv
+    return None
+
+
+def battery_saturated(record: Record) -> bool:
+    return record.record_version >= VERSION_V6 and bool(
+        record.power_flags & POWER_FLAG_BATTERY_SATURATED
+    )
+
+
 def record_to_row(record: Record) -> dict[str, object]:
     flags = record.flags
     link_flags = record.link_flags
@@ -528,6 +619,7 @@ def record_to_row(record: Record) -> dict[str, object]:
     canonical_battery = canonical_battery_mv(record)
     gpio35_battery = battery_gpio35_mv(record)
     gpio34_battery = battery_gpio34_mv(record)
+    pin_battery = battery_pin_mv(record)
     return {
         "record_version": record.record_version,
         "seq": record.seq,
@@ -564,6 +656,9 @@ def record_to_row(record: Record) -> dict[str, object]:
         "battery_gpio35_mv": optional_int(gpio35_battery),
         "battery_gpio34_valid": gpio34_battery is not None,
         "battery_gpio34_mv": optional_int(gpio34_battery),
+        "battery_pin_valid": pin_battery is not None,
+        "battery_pin_mv": optional_int(pin_battery),
+        "battery_saturated": battery_saturated(record),
         "power_flags_hex": f"0x{record.power_flags:02x}",
     }
 
@@ -603,7 +698,25 @@ def write_geojson(records: list[Record], path: Path) -> None:
     )
 
 
-def write_html_map(records: list[Record], path: Path) -> None:
+def load_geojson(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read GeoJSON overlay {path}: {exc}") from exc
+
+    if not isinstance(data, dict) or data.get("type") != "FeatureCollection":
+        raise ValueError(f"GeoJSON overlay {path} is not a FeatureCollection")
+    return data
+
+
+def find_neighbourhoods_geojson(dump_path: Path, out_dir: Path) -> Path | None:
+    for candidate in (out_dir / "neighbourhoods.geojson", dump_path.with_name("neighbourhoods.geojson")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def write_html_map(records: list[Record], path: Path, neighbourhoods_geojson: dict[str, Any] | None = None) -> None:
     points = [
         {
             "seq": record.seq,
@@ -626,11 +739,14 @@ def write_html_map(records: list[Record], path: Path) -> None:
             "battery_mv": canonical_battery_mv(record),
             "battery_gpio35_mv": battery_gpio35_mv(record),
             "battery_gpio34_mv": battery_gpio34_mv(record),
+            "battery_pin_mv": battery_pin_mv(record),
+            "battery_saturated": battery_saturated(record),
         }
         for record in records
     ]
 
     data_json = json.dumps(points)
+    neighbourhoods_json = json.dumps(neighbourhoods_geojson).replace("</", "<\\/") if neighbourhoods_geojson else "null"
     escaped_title = html.escape(path.stem)
 
     path.write_text(
@@ -659,14 +775,42 @@ def write_html_map(records: list[Record], path: Path) -> None:
       line-height: 1.35;
     }}
     .panel strong {{ display: block; font-size: 14px; margin-bottom: 4px; }}
+    .controls {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 8px 0;
+    }}
+    .controls label {{
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      white-space: nowrap;
+    }}
     .legend {{ margin-top: 8px; display: grid; gap: 4px; }}
     .dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }}
+    .neighbourhood-label {{
+      background: rgba(17, 24, 39, 0.82);
+      border: 0;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 5px;
+      box-shadow: none;
+    }}
+    .neighbourhood-label::before {{ display: none; }}
   </style>
 </head>
 <body>
   <div id="map"></div>
   <div class="panel">
     <strong>Tracker diagnostic log</strong>
+    <div class="controls">
+      <label><input type="checkbox" id="showNeighbourhoods" checked> Neighbourhoods</label>
+      <label><input type="checkbox" id="centerNeighbourhoods" checked> Power Hill at gateway</label>
+    </div>
     <div id="summary"></div>
     <div class="legend">
       <div><span class="dot" style="background:#2563eb"></span>moving</div>
@@ -680,11 +824,32 @@ def write_html_map(records: list[Record], path: Path) -> None:
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const points = {data_json};
+    const neighbourhoodGeoJson = {neighbourhoods_json};
     const map = L.map('map');
     L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }}).addTo(map);
+    map.createPane('neighbourhoodPane');
+    map.getPane('neighbourhoodPane').style.zIndex = 350;
+
+    const neighbourhoodLayer = L.layerGroup().addTo(map);
+    const showNeighbourhoods = document.getElementById('showNeighbourhoods');
+    const centerNeighbourhoods = document.getElementById('centerNeighbourhoods');
+    const neighbourhoodAnchor = {{
+      featureName: 'Power Hill',
+      target: {{ lat: 60.220101984, lon: 24.836646496 }}
+    }};
+    if (!neighbourhoodGeoJson) {{
+      showNeighbourhoods.checked = false;
+      showNeighbourhoods.disabled = true;
+      centerNeighbourhoods.disabled = true;
+    }}
+
+    function escapeHtml(value) {{
+      const replacements = {{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }};
+      return String(value ?? '').replace(/[&<>"']/g, char => replacements[char]);
+    }}
 
     const colorFor = (point) => {{
       if (point.result === 'send_failed') return '#dc2626';
@@ -694,6 +859,151 @@ def write_html_map(records: list[Record], path: Path) -> None:
       if (point.motion_state === 'stationary') return '#16a34a';
       return '#6b7280';
     }};
+
+    function isLonLat(value) {{
+      return Array.isArray(value)
+        && value.length >= 2
+        && typeof value[0] === 'number'
+        && typeof value[1] === 'number';
+    }}
+
+    function walkCoordinates(coords, visitor) {{
+      if (isLonLat(coords)) {{
+        visitor(coords[0], coords[1]);
+        return;
+      }}
+      if (!Array.isArray(coords)) return;
+      for (const child of coords) walkCoordinates(child, visitor);
+    }}
+
+    function transformCoordinates(coords, transform) {{
+      if (isLonLat(coords)) {{
+        const [lon, lat, ...rest] = coords;
+        const [newLon, newLat] = transform(lon, lat);
+        return [newLon, newLat, ...rest];
+      }}
+      if (!Array.isArray(coords)) return coords;
+      return coords.map(child => transformCoordinates(child, transform));
+    }}
+
+    function geoJsonCenter(geojson, featureName = '') {{
+      let minLon = Infinity;
+      let minLat = Infinity;
+      let maxLon = -Infinity;
+      let maxLat = -Infinity;
+      const features = Array.isArray(geojson?.features) ? geojson.features : [];
+      const wantedName = String(featureName || '').toLowerCase();
+      for (const feature of features) {{
+        if (wantedName) {{
+          const props = (feature && feature.properties) || {{}};
+          const names = [props.name, props._name].map(value => String(value || '').toLowerCase());
+          if (!names.includes(wantedName)) continue;
+        }}
+        const geometry = feature?.geometry;
+        if (!geometry?.coordinates) continue;
+        walkCoordinates(geometry.coordinates, (lon, lat) => {{
+          minLon = Math.min(minLon, lon);
+          minLat = Math.min(minLat, lat);
+          maxLon = Math.max(maxLon, lon);
+          maxLat = Math.max(maxLat, lat);
+        }});
+      }}
+      if (!Number.isFinite(minLon) || !Number.isFinite(minLat)) return null;
+      return {{
+        lon: (minLon + maxLon) / 2,
+        lat: (minLat + maxLat) / 2
+      }};
+    }}
+
+    function translateLonLat(lon, lat, sourceCenter, targetCenter) {{
+      const metersPerDegreeLat = 111320;
+      const sourceLatRad = sourceCenter.lat * Math.PI / 180;
+      const targetLatRad = targetCenter.lat * Math.PI / 180;
+      const eastMeters = (lon - sourceCenter.lon) * metersPerDegreeLat * Math.cos(sourceLatRad);
+      const northMeters = (lat - sourceCenter.lat) * metersPerDegreeLat;
+      const targetCos = Math.max(0.1, Math.abs(Math.cos(targetLatRad)));
+      return [
+        targetCenter.lon + eastMeters / (metersPerDegreeLat * targetCos),
+        targetCenter.lat + northMeters / metersPerDegreeLat
+      ];
+    }}
+
+    function neighbourhoodName(feature) {{
+      const props = (feature && feature.properties) || {{}};
+      return props.name || props._name || props.type || 'Neighbourhood';
+    }}
+
+    function neighbourhoodPopup(feature) {{
+      const props = (feature && feature.properties) || {{}};
+      const details = [];
+      if (props.tagline) details.push(escapeHtml(props.tagline));
+      if (props.camping_allowed !== undefined) details.push(`camping: ${{escapeHtml(props.camping_allowed)}}`);
+      if (centerNeighbourhoods.checked) {{
+        details.push(`${{neighbourhoodAnchor.featureName}} anchored at gateway ${{neighbourhoodAnchor.target.lat.toFixed(9)}}, ${{neighbourhoodAnchor.target.lon.toFixed(9)}}`);
+      }}
+      return `<strong>${{escapeHtml(neighbourhoodName(feature))}}</strong>${{details.length ? '<br>' + details.join('<br>') : ''}}`;
+    }}
+
+    function translatedNeighbourhoodGeoJson() {{
+      if (!neighbourhoodGeoJson) return null;
+      if (!centerNeighbourhoods.checked) return neighbourhoodGeoJson;
+
+      const sourceCenter = geoJsonCenter(neighbourhoodGeoJson, neighbourhoodAnchor.featureName) || geoJsonCenter(neighbourhoodGeoJson);
+      if (!sourceCenter) return neighbourhoodGeoJson;
+      const targetCenter = neighbourhoodAnchor.target;
+
+      const clone = JSON.parse(JSON.stringify(neighbourhoodGeoJson));
+      for (const feature of clone.features || []) {{
+        if (!feature.geometry?.coordinates) continue;
+        feature.geometry.coordinates = transformCoordinates(
+          feature.geometry.coordinates,
+          (lon, lat) => translateLonLat(lon, lat, sourceCenter, targetCenter)
+        );
+      }}
+      return clone;
+    }}
+
+    function drawNeighbourhoods() {{
+      neighbourhoodLayer.clearLayers();
+      if (!showNeighbourhoods.checked || !neighbourhoodGeoJson) return null;
+
+      const geojson = translatedNeighbourhoodGeoJson();
+      if (!geojson) return null;
+
+      const layer = L.geoJSON(geojson, {{
+        pane: 'neighbourhoodPane',
+        style: () => ({{
+          color: '#111827',
+          weight: 2,
+          opacity: 0.82,
+          fillColor: '#f59e0b',
+          fillOpacity: 0.13,
+          dashArray: centerNeighbourhoods.checked ? '5 4' : undefined
+        }}),
+        onEachFeature: (feature, featureLayer) => {{
+          featureLayer.bindPopup(neighbourhoodPopup(feature));
+          featureLayer.bindTooltip(escapeHtml(neighbourhoodName(feature)), {{
+            sticky: true,
+            className: 'neighbourhood-label'
+          }});
+        }}
+      }}).addTo(neighbourhoodLayer);
+
+      const bounds = layer.getBounds();
+      return bounds.isValid() ? bounds : null;
+    }}
+
+    function fitMap(overlayBounds) {{
+      let bounds = latLngs.length ? L.latLngBounds(latLngs) : null;
+      if (overlayBounds && overlayBounds.isValid()) {{
+        bounds = bounds ? bounds.extend(overlayBounds) : overlayBounds;
+      }}
+      if (bounds && bounds.isValid()) {{
+        map.fitBounds(bounds, {{ padding: [28, 28], maxZoom: 17 }});
+      }} else {{
+        map.setView([0, 0], 2);
+      }}
+    }}
 
     const latLngs = [];
     for (const point of points) {{
@@ -712,6 +1022,7 @@ def write_html_map(records: list[Record], path: Path) -> None:
         DR: ${{point.lorawan_dr ?? 'n/a'}} ADR: ${{point.adr_enabled ? 'on' : 'off'}}<br>
         Downlink: ${{point.downlink_rssi ?? 'n/a'}} dBm / ${{point.downlink_snr ?? 'n/a'}} dB<br>
         Battery: ${{point.battery_mv ?? 'n/a'}} mV<br>
+        Battery ADC pin: ${{point.battery_pin_mv ?? 'n/a'}} mV${{point.battery_saturated ? ' (saturated)' : ''}}<br>
         Battery GPIO35 candidate: ${{point.battery_gpio35_mv ?? 'n/a'}} mV<br>
         Battery GPIO34: ${{point.battery_gpio34_mv ?? 'n/a'}} mV<br>
         Satellites: ${{point.satellites}}<br>
@@ -728,12 +1039,11 @@ def write_html_map(records: list[Record], path: Path) -> None:
 
     if (latLngs.length > 1) {{
       L.polyline(latLngs, {{ color: '#111827', weight: 2, opacity: 0.55 }}).addTo(map);
-      map.fitBounds(latLngs, {{ padding: [28, 28] }});
-    }} else if (latLngs.length === 1) {{
-      map.setView(latLngs[0], 15);
-    }} else {{
-      map.setView([0, 0], 2);
     }}
+    fitMap(drawNeighbourhoods());
+
+    showNeighbourhoods.addEventListener('change', () => fitMap(drawNeighbourhoods()));
+    centerNeighbourhoods.addEventListener('change', () => fitMap(drawNeighbourhoods()));
 
     const first = points[0];
     const last = points[points.length - 1];
@@ -768,6 +1078,16 @@ def main() -> int:
             "Can be passed multiple times."
         ),
     )
+    parser.add_argument(
+        "--neighbourhoods-geojson",
+        type=Path,
+        default=None,
+        help=(
+            "Optional FeatureCollection overlay embedded in diagnostic-log-map.html. "
+            "If omitted, the decoder also checks for neighbourhoods.geojson in the output "
+            "directory or beside the dump."
+        ),
+    )
     args = parser.parse_args()
 
     dump_path = args.dump
@@ -783,10 +1103,17 @@ def main() -> int:
     csv_path = out_dir / "diagnostic-log.csv"
     geojson_path = out_dir / "diagnostic-log.geojson"
     html_path = out_dir / "diagnostic-log-map.html"
+    neighbourhoods_path = args.neighbourhoods_geojson or find_neighbourhoods_geojson(dump_path, out_dir)
+    neighbourhoods_geojson = None
+    if neighbourhoods_path is not None:
+        try:
+            neighbourhoods_geojson = load_geojson(neighbourhoods_path)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     write_csv(records, csv_path)
     write_geojson(records, geojson_path)
-    write_html_map(records, html_path)
+    write_html_map(records, html_path, neighbourhoods_geojson)
 
     print(f"decoded_records={len(records)}")
     if args.record_version is not None:
@@ -795,6 +1122,8 @@ def main() -> int:
     print(f"csv={csv_path}")
     print(f"geojson={geojson_path}")
     print(f"html_map={html_path}")
+    if neighbourhoods_path is not None:
+        print(f"neighbourhoods_geojson={neighbourhoods_path}")
     return 0
 
 

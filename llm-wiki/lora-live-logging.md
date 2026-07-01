@@ -1,6 +1,6 @@
 # LoRa Live Logging
 
-Last updated: 2026-06-30.
+Last updated: 2026-07-01.
 
 The repository now includes a generic ChirpStack live position logger:
 
@@ -60,10 +60,13 @@ Outputs:
 - `device_events.json`: last seen ChirpStack join/uplink event per streamed device, even when the payload is not a decoded position;
 - `positions.csv`: spreadsheet-friendly log;
 - `positions.geojson`: GIS/map-friendly export.
+- `neighbourhoods.geojson`: optional static overlay file served beside the map when available.
 
 By default the logger keeps the latest `10000` points in those live outputs. Use `--max-points` to change that. On restart, the logger reloads an existing `points.json` file from the output directory so normal restarts do not wipe the visible map history. Duplicate/replayed event records are ignored based on network time, DevAddr, frame counter, port, and raw payload.
 
 The browser map defaults to a `Last 24h` view and shows the latest decoded position age plus latest uplink-event age. Disable the checkbox to inspect the full retained history. The map colors each device separately and includes a device filter when retained points or event status exist for more than one DevEUI.
+
+If `neighbourhoods.geojson` is present in the live-map output directory, the browser map offers a neighbourhood overlay. The default view anchors the `Power Hill` neighbourhood around the gateway reference coordinate `60.220101984, 24.836646496` while preserving the overlay's approximate meter scale, which is useful for comparing tracker movement against the neighbourhood-size footprint. Disable `Power Hill at gateway` to view the GeoJSON in its original coordinates.
 
 The current firmware port `4` LoRaWAN payload only contains latitude, longitude, and HDOP. Speed is available in the on-device diagnostic flash log, not in the LoRaWAN receiver stream, unless the payload format is changed later.
 
