@@ -36,7 +36,9 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_MOTION_RESUME_MIN_MS 3000
 #define POSITION_UPLINK_CONFIRMED_INTERVAL_MS 600000
 #define POSITION_UPLINK_FAILURES_BEFORE_REJOIN 3
-#define LORAWAN_LINK_REBOOT_AFTER_MS 1800000
+#define LORAWAN_GOOD_GNSS_REBOOT_AFTER_MS 3600000
+#define LORAWAN_LINK_REBOOT_LAST_RESORT_MS 21600000
+#define LORAWAN_RECOVERY_LOG_INTERVAL_MS 900000
 #define DIAGNOSTIC_HEARTBEAT_INTERVAL_MS POSITION_UPLINK_STATIONARY_INTERVAL_MS
 
 #define LORAWAN_JOIN_RETRY_MIN_MS 15000
@@ -57,12 +59,15 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define MOTION_HOLD_MS 30000
 
 static atomic_t lorawan_joined;
+static atomic_t lorawan_link_state;
 static atomic_t consecutive_position_send_failures;
 static int64_t last_uplink_attempt_timestamp;
 static int64_t last_confirmed_uplink_timestamp;
 static bool have_attempted_position;
 static bool lorawan_reboot_armed;
 static int64_t lorawan_link_down_timestamp;
+static int64_t lorawan_good_gnss_unjoined_timestamp;
+static int64_t lorawan_last_recovery_log_timestamp;
 static int64_t last_diagnostic_position_timestamp;
 static bool have_logged_diagnostic_position;
 
@@ -84,6 +89,16 @@ enum tracker_motion_state {
 	TRACKER_MOTION_STATIONARY,
 	TRACKER_MOTION_ACTIVE,
 	TRACKER_MOTION_MOVING,
+};
+
+enum tracker_lorawan_link_state {
+	TRACKER_LORAWAN_LINK_BOOTING,
+	TRACKER_LORAWAN_LINK_INIT,
+	TRACKER_LORAWAN_LINK_JOINING,
+	TRACKER_LORAWAN_LINK_JOINED,
+	TRACKER_LORAWAN_LINK_REJOINING,
+	TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF,
+	TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT,
 };
 
 struct accel_motion_sample {
@@ -122,9 +137,46 @@ static void lorawan_set_joined(bool joined)
 	atomic_set(&lorawan_joined, joined ? 1 : 0);
 }
 
+static enum tracker_lorawan_link_state lorawan_get_link_state(void)
+{
+	return (enum tracker_lorawan_link_state)atomic_get(&lorawan_link_state);
+}
+
+static void lorawan_set_link_state(enum tracker_lorawan_link_state state)
+{
+	atomic_set(&lorawan_link_state, state);
+}
+
+static const char *lorawan_link_state_name(enum tracker_lorawan_link_state state)
+{
+	switch (state) {
+	case TRACKER_LORAWAN_LINK_BOOTING:
+		return "booting";
+	case TRACKER_LORAWAN_LINK_INIT:
+		return "init";
+	case TRACKER_LORAWAN_LINK_JOINING:
+		return "joining";
+	case TRACKER_LORAWAN_LINK_JOINED:
+		return "joined";
+	case TRACKER_LORAWAN_LINK_REJOINING:
+		return "rejoining";
+	case TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF:
+		return "offline_backoff";
+	case TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT:
+		return "reboot_last_resort";
+	default:
+		return "unknown";
+	}
+}
+
+static void log_lorawan_event(int64_t now, uint8_t result, int ret,
+			      uint32_t delay_ms,
+			      enum lorawan_message_type message_type);
+
 static void lorawan_note_position_send_success(void)
 {
 	atomic_set(&consecutive_position_send_failures, 0);
+	lorawan_good_gnss_unjoined_timestamp = 0;
 }
 
 static void lorawan_note_position_send_failure(int ret,
@@ -143,11 +195,17 @@ static void lorawan_note_position_send_failure(int ret,
 	}
 
 	if (lorawan_is_joined()) {
+		int64_t now = k_uptime_get();
+
 		LOG_WRN("LoRaWAN link marked down after %d consecutive position send failures (last %d)",
 			(int)failures, ret);
 		lorawan_set_joined(false);
-		lorawan_link_down_timestamp = k_uptime_get();
+		lorawan_set_link_state(TRACKER_LORAWAN_LINK_REJOINING);
+		lorawan_link_down_timestamp = now;
+		lorawan_last_recovery_log_timestamp = now;
 		lorawan_reboot_armed = true;
+		log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_MARKED_DOWN, ret, 0,
+				  message_type);
 	}
 }
 
@@ -507,6 +565,70 @@ static enum lorawan_message_type position_message_type(int64_t now)
 	return LORAWAN_MSG_UNCONFIRMED;
 }
 
+static void log_lorawan_event(int64_t now, uint8_t result, int ret,
+			      uint32_t delay_ms,
+			      enum lorawan_message_type message_type)
+{
+	struct diagnostic_log_uplink_entry entry = {0};
+	struct lorawan_node_status lorawan_status;
+	struct tracker_battery_sample battery = {0};
+	uint32_t utc_packed = diagnostic_log_pack_utc(&gnss_data.utc);
+
+	lorawan_node_get_status(&lorawan_status);
+
+	entry.uptime_ms = i64_to_u32_saturated(now);
+	entry.utc_packed = utc_packed;
+	entry.latitude = (int32_t)(gnss_data.nav_data.latitude >> 5);
+	entry.longitude = (int32_t)(gnss_data.nav_data.longitude >> 5);
+	entry.speed_cm_s = u32_to_u16_saturated((gnss_data.nav_data.speed + 5U) / 10U);
+	entry.hdop = u32_to_u16_saturated(gnss_data.info.hdop);
+	entry.interval_s = u32_to_u16_saturated(delay_ms / 1000U);
+	entry.send_ret = int_to_i16_saturated(ret);
+	entry.motion_state = DIAGNOSTIC_LOG_MOTION_UNKNOWN;
+	entry.result = result;
+	entry.satellites = u32_to_u8_saturated(gnss_data.info.satellites_cnt);
+	entry.downlink_rssi = lorawan_status.last_downlink_rssi;
+	entry.downlink_snr = lorawan_status.last_downlink_snr;
+
+	if (utc_packed != 0U) {
+		entry.flags |= DIAGNOSTIC_LOG_FLAG_UTC_VALID;
+	}
+	if (lorawan_status.adr_enabled) {
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_ADR_ENABLED;
+	}
+	if (lorawan_status.datarate_valid) {
+		entry.lorawan_dr = (uint8_t)lorawan_status.datarate;
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_DR_VALID;
+	}
+	if (lorawan_status.last_downlink_valid) {
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_DOWNLINK_VALID;
+	}
+	if (message_type == LORAWAN_MSG_CONFIRMED) {
+		entry.link_flags |= DIAGNOSTIC_LOG_LINK_FLAG_CONFIRMED;
+	}
+
+	if (tracker_power_monitor_read_battery_sample(&battery) == 0) {
+		if (battery.battery_mv_valid) {
+			entry.power_flags |= DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_VALID;
+			entry.battery_mv = battery.battery_mv;
+		} else {
+			entry.battery_mv = DIAGNOSTIC_LOG_BATTERY_MV_INVALID;
+		}
+		if (battery.pin_mv_valid) {
+			entry.power_flags |= DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_PIN_VALID;
+			entry.battery_pin_mv = battery.pin_mv;
+		}
+		if (battery.saturated) {
+			entry.power_flags |= DIAGNOSTIC_LOG_POWER_FLAG_BATTERY_SATURATED;
+		}
+	} else {
+		entry.battery_mv = DIAGNOSTIC_LOG_BATTERY_MV_INVALID;
+		entry.battery_pin_mv = DIAGNOSTIC_LOG_BATTERY_MV_INVALID;
+	}
+
+	(void)diagnostic_log_write_uplink(&entry);
+}
+
 static void tracker_motion_init(void)
 {
 	last_motion_timestamp = k_uptime_get();
@@ -564,6 +686,13 @@ static void handle_event_gnss_position(void)
 	}
 
 	if (!lorawan_is_joined()) {
+		if (lorawan_good_gnss_unjoined_timestamp == 0) {
+			lorawan_good_gnss_unjoined_timestamp = now;
+			lorawan_last_recovery_log_timestamp = now;
+			log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_RECOVERY_WAIT,
+					  -ENOTCONN, 0, LORAWAN_MSG_UNCONFIRMED);
+		}
+
 		if (have_logged_diagnostic_position &&
 		    now - last_diagnostic_position_timestamp < interval_ms) {
 			return;
@@ -670,6 +799,63 @@ static void handle_diagnostic_heartbeat(void)
 		gnss_data.info.hdop % 1000);
 }
 
+static void lorawan_recovery_watchdog(void)
+{
+	int64_t now = k_uptime_get();
+	int64_t good_gnss_unjoined_elapsed;
+	int64_t link_down_elapsed;
+
+	if (lorawan_is_joined()) {
+		lorawan_good_gnss_unjoined_timestamp = 0;
+		return;
+	}
+
+	if (lorawan_good_gnss_unjoined_timestamp > 0) {
+		good_gnss_unjoined_elapsed = now - lorawan_good_gnss_unjoined_timestamp;
+
+		if (now - lorawan_last_recovery_log_timestamp >=
+		    LORAWAN_RECOVERY_LOG_INTERVAL_MS) {
+			lorawan_last_recovery_log_timestamp = now;
+			log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_RECOVERY_WAIT,
+					  -ENOTCONN,
+					  i64_to_u32_saturated(good_gnss_unjoined_elapsed),
+					  LORAWAN_MSG_UNCONFIRMED);
+			LOG_WRN("LoRaWAN still not joined after %lld ms with usable GNSS (state=%s)",
+				(long long)good_gnss_unjoined_elapsed,
+				lorawan_link_state_name(lorawan_get_link_state()));
+		}
+
+		if (good_gnss_unjoined_elapsed >= LORAWAN_GOOD_GNSS_REBOOT_AFTER_MS) {
+			lorawan_set_link_state(TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT);
+			log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_REBOOT_LAST_RESORT,
+					  -ETIMEDOUT,
+					  i64_to_u32_saturated(good_gnss_unjoined_elapsed),
+					  LORAWAN_MSG_UNCONFIRMED);
+			LOG_ERR("LoRaWAN not joined for %lld ms with usable GNSS; rebooting as last resort",
+				(long long)good_gnss_unjoined_elapsed);
+			k_sleep(K_MSEC(250));
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+	}
+
+	if (!lorawan_reboot_armed || lorawan_link_down_timestamp <= 0) {
+		return;
+	}
+
+	link_down_elapsed = now - lorawan_link_down_timestamp;
+	if (link_down_elapsed >= LORAWAN_LINK_REBOOT_LAST_RESORT_MS) {
+		lorawan_set_link_state(TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT);
+		log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_REBOOT_LAST_RESORT,
+				  -ETIMEDOUT,
+				  i64_to_u32_saturated(link_down_elapsed),
+				  LORAWAN_MSG_UNCONFIRMED);
+		LOG_ERR("LoRaWAN link unrecovered for %lld ms; rebooting as long-horizon last resort",
+			(long long)link_down_elapsed);
+		k_sleep(K_MSEC(250));
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+}
+
 static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 {
 	bool initialized = false;
@@ -683,9 +869,19 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 		int ret;
 
 		if (!initialized) {
+			int64_t now = k_uptime_get();
+
+			lorawan_set_link_state(TRACKER_LORAWAN_LINK_INIT);
+			log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_INIT_ATTEMPT, 0,
+					  retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
 			LOG_INF("LoRaWAN init attempt");
 			ret = lorawan_node_init();
 			if (ret != 0) {
+				lorawan_set_link_state(TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF);
+				log_lorawan_event(k_uptime_get(),
+						  DIAGNOSTIC_LOG_LINK_INIT_FAILED,
+						  ret, retry_delay_ms,
+						  LORAWAN_MSG_UNCONFIRMED);
 				LOG_WRN("LoRaWAN init failed: %d; retry in %u ms",
 					ret, retry_delay_ms);
 				k_sleep(K_MSEC(retry_delay_ms));
@@ -696,6 +892,8 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 
 			initialized = true;
 			retry_delay_ms = LORAWAN_JOIN_RETRY_MIN_MS;
+			log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_INIT_OK, 0,
+					  0, LORAWAN_MSG_UNCONFIRMED);
 			LOG_INF("LoRaWAN initialized");
 		}
 
@@ -704,25 +902,27 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 			continue;
 		}
 
-		if (lorawan_reboot_armed &&
-		    lorawan_link_down_timestamp > 0 &&
-		    k_uptime_get() - lorawan_link_down_timestamp >= LORAWAN_LINK_REBOOT_AFTER_MS) {
-			LOG_ERR("LoRaWAN link unrecovered for %u ms; rebooting to reset radio/MAC state",
-				LORAWAN_LINK_REBOOT_AFTER_MS);
-			sys_reboot(SYS_REBOOT_COLD);
-		}
-
+		lorawan_set_link_state(lorawan_reboot_armed ?
+				       TRACKER_LORAWAN_LINK_REJOINING :
+				       TRACKER_LORAWAN_LINK_JOINING);
+		log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_JOIN_ATTEMPT,
+				  0, retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
 		LOG_INF("LoRaWAN join attempt");
 		led_status_blink_continuous(LED_B, 100, 100, 3, 0);
 
 		ret = lorawan_node_join();
 		if (ret == 0) {
 			lorawan_set_joined(true);
+			lorawan_set_link_state(TRACKER_LORAWAN_LINK_JOINED);
 			atomic_set(&consecutive_position_send_failures, 0);
 			last_confirmed_uplink_timestamp = 0;
 			lorawan_reboot_armed = false;
 			lorawan_link_down_timestamp = 0;
+			lorawan_good_gnss_unjoined_timestamp = 0;
+			lorawan_last_recovery_log_timestamp = 0;
 			retry_delay_ms = LORAWAN_JOIN_RETRY_MIN_MS;
+			log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_JOIN_SUCCESS,
+					  0, 0, LORAWAN_MSG_UNCONFIRMED);
 
 			LOG_INF("LoRaWAN joined");
 			led_status_on(LED_B);
@@ -734,6 +934,9 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 			continue;
 		}
 
+		lorawan_set_link_state(TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF);
+		log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_JOIN_FAILED,
+				  ret, retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
 		LOG_WRN("LoRaWAN join failed: %d; retry in %u ms", ret, retry_delay_ms);
 		led_status_on(LED_B);
 		k_sleep(K_MSEC(500));
@@ -774,7 +977,25 @@ int main(void)
 	ret = tracker_power_monitor_init();
 	if (ret != 0) {
 		LOG_WRN("power monitor disabled: %d", ret);
+	} else {
+		struct tracker_battery_sample battery = {0};
+
+		ret = tracker_power_monitor_read_battery_sample(&battery);
+		if (ret == 0) {
+			LOG_INF("battery ADC sample: raw=%u pin=%u mV (%s) battery=%u mV (%s) clipped=%d",
+				battery.raw,
+				battery.pin_mv,
+				battery.pin_mv_valid ? "valid" : "invalid",
+				battery.battery_mv,
+				battery.battery_mv_valid ? "valid" : "invalid",
+				battery.saturated);
+		} else {
+			LOG_WRN("battery ADC sample failed: %d", ret);
+		}
 	}
+
+	log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_BOOT, 0, 0,
+			  LORAWAN_MSG_UNCONFIRMED);
 
 	gnss_init(gnss_position_cb);
 	tracker_motion_init();
@@ -796,6 +1017,7 @@ int main(void)
 		}
 
 		handle_diagnostic_heartbeat();
+		lorawan_recovery_watchdog();
 	}
 
 	return 0;

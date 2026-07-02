@@ -14,7 +14,8 @@
 LOG_MODULE_REGISTER(diagnostic_log, CONFIG_APP_LOG_LEVEL);
 
 #define DIAGNOSTIC_LOG_MAGIC 0xd107U
-#define DIAGNOSTIC_LOG_VERSION 6U
+#define DIAGNOSTIC_LOG_VERSION 7U
+#define DIAGNOSTIC_LOG_MIN_COMPAT_VERSION 6U
 #define DIAGNOSTIC_LOG_RECORD_SIZE 48U
 #define DIAGNOSTIC_LOG_SECTOR_SIZE 4096U
 
@@ -64,6 +65,8 @@ BUILD_ASSERT((DT_REG_SIZE(DIAGNOSTIC_LOG_PARTITION_NODE) % DIAGNOSTIC_LOG_SECTOR
 #define DIAGNOSTIC_LOG_RECORD_CAPACITY \
 	(DIAGNOSTIC_LOG_SECTOR_COUNT * DIAGNOSTIC_LOG_RECORDS_PER_SECTOR)
 
+K_MUTEX_DEFINE(diagnostic_log_mutex);
+
 static const struct flash_area *diagnostic_log_area;
 static bool diagnostic_log_ready;
 static uint32_t diagnostic_log_write_index;
@@ -103,7 +106,8 @@ static bool diagnostic_log_record_is_valid(const struct diagnostic_log_record *r
 	uint16_t crc;
 
 	if (record->magic != DIAGNOSTIC_LOG_MAGIC ||
-	    record->version != DIAGNOSTIC_LOG_VERSION ||
+	    record->version < DIAGNOSTIC_LOG_MIN_COMPAT_VERSION ||
+	    record->version > DIAGNOSTIC_LOG_VERSION ||
 	    record->record_size != DIAGNOSTIC_LOG_RECORD_SIZE) {
 		return false;
 	}
@@ -231,10 +235,12 @@ int diagnostic_log_write_uplink(const struct diagnostic_log_uplink_entry *entry)
 		return -ENODEV;
 	}
 
+	k_mutex_lock(&diagnostic_log_mutex, K_FOREVER);
+
 	ret = diagnostic_log_prepare_write_slot();
 	if (ret != 0) {
 		LOG_WRN("diagnostic log write slot prepare failed: %d", ret);
-		return ret;
+		goto out;
 	}
 
 	record.magic = DIAGNOSTIC_LOG_MAGIC;
@@ -267,14 +273,16 @@ int diagnostic_log_write_uplink(const struct diagnostic_log_uplink_entry *entry)
 	ret = flash_area_write(diagnostic_log_area, offset, &record, sizeof(record));
 	if (ret != 0) {
 		LOG_WRN("diagnostic log write failed at 0x%x: %d", offset, ret);
-		return ret;
+		goto out;
 	}
 
 	diagnostic_log_next_seq++;
 	diagnostic_log_write_index = (diagnostic_log_write_index + 1U) %
 				     DIAGNOSTIC_LOG_RECORD_CAPACITY;
 
-	return 0;
+out:
+	k_mutex_unlock(&diagnostic_log_mutex);
+	return ret;
 }
 
 #else

@@ -1,6 +1,6 @@
 # Storage and Logging
 
-Last updated: 2026-07-01.
+Last updated: 2026-07-02.
 
 This page captures what is currently known about persistent storage and longer-term logging on the TrackerD-LS Zephyr firmware.
 
@@ -34,9 +34,9 @@ This page captures what is currently known about persistent storage and longer-t
 - The `diagnostic-log` partition is now used by the firmware for compact binary uplink-decision records.
 - The default firmware logs to UART with `CONFIG_LOG_BACKEND_UART=y`.
 - The default firmware does not enable `CONFIG_FILE_SYSTEM`, `CONFIG_DISK_ACCESS`, `CONFIG_SDHC`, `CONFIG_SDMMC_STACK`, `CONFIG_FAT_FILESYSTEM_ELM`, or LittleFS.
-- Battery-voltage monitoring uses ESP32 IO34 / ADC1 channel 6. The TrackerD-LS v1.3 schematic shows `BAT+` through `100k` to the ADC node and `470k` from that node to ground, so the firmware scales ADC pin voltage by `(100 + 470) / 470` when the ADC conversion is in range.
+- Battery-voltage monitoring uses ESP32 IO34 / ADC1 channel 6. The TrackerD-LS v1.3 schematic shows `BAT+` through `100k` to the ADC node and `470k` from that node to ground, so the firmware scales ADC pin voltage by `(100 + 470) / 470`.
 - The earlier v4 comparison image sampled both GPIO35 and GPIO34. Bench validation on 2026-06-29 showed GPIO35 near ground and GPIO34 in the battery-sense range; GPIO34 is the correct battery-voltage path.
-- A later external measurement around `4.09 V` showed that the current Zephyr ESP32 calibrated ADC conversion path can saturate before the firmware can report a true full battery voltage with this divider. Current diagnostic records therefore flag saturation and preserve the ADC pin millivolts instead of treating the clipped value as real battery voltage.
+- A later external measurement around `4.09 V` and a stock Tracker_109 reading around `4002 mV` showed that the Zephyr ESP32 ADC helper path clips the calibrated 12 dB conversion around `2550 mV` at the ADC pin, producing a false pack reading near `3088 mV`. The current experimental firmware bypasses that helper and uses the ESP HAL raw ADC path plus Espressif line-fitting calibration directly.
 
 ## Validation
 
@@ -50,6 +50,12 @@ This page captures what is currently known about persistent storage and longer-t
 - The provisioning-shell build also passed after the diagnostic log source was added. The provisioning artifact remained `323584` bytes, SHA256 `F81FB7F4A85795A1EB21C859A1570A63BCFD053F1D3E74D1F1514A6E6A8AD40C`.
 - Host decoder validation passed for an empty/no-record input and for a synthetic valid record.
 - The diagnostic-log production image was flashed to the hardware bench, the diagnostic partition was erased, and a ten minute run produced a raw flash export that decoded to six valid records. The run joined LoRaWAN once, sent five position uplinks in console logs, and had zero `FATAL`/`ASSERT` markers. Decoded records showed one initial `active` record with `30 s` interval and five `stationary` records with `120 s` interval.
+
+2026-07-02:
+
+- The v7 link-recovery build passed with `zephyr.bin` size `258048` bytes and SHA256 `DF87D3B1FDF2536FF92DD1C23F7470BC5231A2A7E4DAAE91964685D6D7064012`.
+- An app-only flash to the permanent bench tracker preserved settings. A short boot capture showed diagnostic log initialization, IO34 battery sampling, GNSS fix, OTAA join success, downlink callback, datarate `DR_0`, and one confirmed port `4` position uplink.
+- A post-flash diagnostic dump decoded successfully. New v7 records included both `position` records and `link_event` records such as boot/init/join/recovery-wait events.
 
 ## SD Card Status
 
@@ -76,17 +82,18 @@ For production firmware, avoid writing every Zephyr log line to internal flash. 
 
 ## Diagnostic Circular Log
 
-The firmware now includes `CONFIG_TRACKER_DIAGNOSTIC_LOG=y` by default. It appends one compact binary record for each scheduled position uplink decision:
+The firmware now includes `CONFIG_TRACKER_DIAGNOSTIC_LOG=y` by default. It appends compact binary records for scheduled position uplink decisions and selected LoRaWAN link-state events:
 
 - successful port `4` position sends;
 - failed port `4` position send attempts;
 - `not_joined` decisions, where GNSS/motion says the tracker would send a position at the selected interval, but LoRaWAN is not joined yet.
+- link lifecycle and recovery events such as boot, init, join attempts, join success/failure, link marked down, recovery wait, and last-resort reboot.
 
 It intentionally does not log every GNSS fix. At a 1 Hz GNSS rate, internal flash would fill too quickly and would add unnecessary erase/write churn.
 
-Record version `1` was `40` bytes. Record version `2` is `48` bytes and adds LoRaWAN link-observation fields. Record version `3` stays `48` bytes and adds GPIO35 battery-voltage observation. Record version `4` stays `48` bytes and adds a GPIO34 battery-voltage candidate. Record version `5` stays `48` bytes and stores IO34 battery voltage as the canonical `battery_mv` field when the ADC conversion is in range. Record version `6` stays `48` bytes and replaces the reserved tail with ADC pin millivolts plus an explicit saturation flag.
+Record version `1` was `40` bytes. Record version `2` is `48` bytes and adds LoRaWAN link-observation fields. Record version `3` stays `48` bytes and adds GPIO35 battery-voltage observation. Record version `4` stays `48` bytes and adds a GPIO34 battery-voltage candidate. Record version `5` stays `48` bytes and stores IO34 battery voltage as the canonical `battery_mv` field when the ADC conversion is in range. Record version `6` stays `48` bytes and replaces the reserved tail with ADC pin millivolts plus a saturation/clipping flag field. Record version `7` keeps the same `48` byte layout and adds explicit LoRaWAN link-event result codes.
 
-Each current v6 record includes:
+Each current v7 record includes:
 
 - sequence number;
 - boot uptime in milliseconds;
@@ -103,8 +110,9 @@ Each current v6 record includes:
 - ADR enabled/disabled state;
 - whether the application uplink was confirmed;
 - last downlink RSSI/SNR when a downlink callback has been observed;
-- IO34 battery voltage in millivolts when the ADC conversion is in range;
-- IO34 ADC pin millivolts and a saturation flag when the ADC conversion is clipped.
+- IO34 battery voltage in millivolts;
+- IO34 ADC pin millivolts and a saturation/clipping flag field for fallback readings.
+- a record kind in the host decoder output: `position` or `link_event`.
 
 The `640 KiB` partition is split into `160` erase sectors of `4096` bytes. With current `48` byte records, each sector stores `85` records, leaving a small unused tail so records never cross sector boundaries. Total capacity is `13600` records.
 
@@ -116,7 +124,7 @@ Approximate retention:
 | 30 s active cadence | 4.7 days |
 | 120 s stationary cadence | 18.9 days |
 
-The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it. The host decoder can read v1, v2, v3, v4, v5, and v6 records.
+The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it. The host decoder can read v1, v2, v3, v4, v5, v6, and v7 records.
 
 ## Dump and Decode Workflow
 
@@ -147,6 +155,8 @@ The decoder writes:
 - `diagnostic-log.csv` for spreadsheet/manual analysis;
 - `diagnostic-log.geojson` for GIS tools;
 - `diagnostic-log-map.html` with an embedded route overlay and Leaflet/OpenStreetMap tiles.
+
+The CSV/GeoJSON/HTML outputs include `record_kind` and `has_location` fields. Link events without a usable location remain in the CSV/GeoJSON properties but are not plotted as route points at `0,0`.
 
 To clear only the diagnostic log partition for a fresh run:
 

@@ -2,9 +2,15 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/adc.h>
+#include <esp_clk_tree.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_err.h>
+#include <esp_private/sar_periph_ctrl.h>
+#include <hal/adc_hal_common.h>
+#include <hal/adc_oneshot_hal.h>
+#include <soc/soc_caps.h>
+
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
@@ -12,72 +18,105 @@
 
 LOG_MODULE_REGISTER(power_monitor, CONFIG_APP_LOG_LEVEL);
 
-#define BATTERY_ADC_NODE DT_NODELABEL(adc0)
-#define BATTERY_ADC_CHANNEL_NODE DT_CHILD(BATTERY_ADC_NODE, channel_6)
+#define BATTERY_ADC_UNIT ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL ADC_CHANNEL_6
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
+#define BATTERY_ADC_BITWIDTH ADC_BITWIDTH_12
+#define BATTERY_ADC_DEFAULT_VREF_MV 1100
 #define BATTERY_DIVIDER_HIGH_KOHM 100
 #define BATTERY_DIVIDER_LOW_KOHM 470
 #define BATTERY_DIVIDER_NUMERATOR \
 	(BATTERY_DIVIDER_HIGH_KOHM + BATTERY_DIVIDER_LOW_KOHM)
 #define BATTERY_DIVIDER_DENOMINATOR BATTERY_DIVIDER_LOW_KOHM
-#define BATTERY_ADC_SATURATED_PIN_MV 2500
 
-#if DT_NODE_HAS_STATUS(BATTERY_ADC_NODE, okay) && DT_NODE_EXISTS(BATTERY_ADC_CHANNEL_NODE)
-static const struct adc_dt_spec battery_adc = {
-	.dev = DEVICE_DT_GET(BATTERY_ADC_NODE),
-	.channel_id = DT_REG_ADDR(BATTERY_ADC_CHANNEL_NODE),
-	.channel_cfg_dt_node_exists = true,
-	.channel_cfg = ADC_CHANNEL_CFG_DT(BATTERY_ADC_CHANNEL_NODE),
-	.vref_mv = DT_PROP_OR(BATTERY_ADC_CHANNEL_NODE, zephyr_vref_mv, 0),
-	.resolution = DT_PROP_OR(BATTERY_ADC_CHANNEL_NODE, zephyr_resolution, 0),
-	.oversampling = DT_PROP_OR(BATTERY_ADC_CHANNEL_NODE, zephyr_oversampling, 0),
-};
+static adc_oneshot_hal_ctx_t battery_adc_hal;
+static adc_cali_handle_t battery_adc_cali;
 static bool battery_ready;
+static bool battery_calibrated;
+
+static int esp_err_to_errno(esp_err_t err)
+{
+	switch (err) {
+	case ESP_OK:
+		return 0;
+	case ESP_ERR_INVALID_ARG:
+	case ESP_ERR_INVALID_STATE:
+		return -EINVAL;
+	case ESP_ERR_NO_MEM:
+		return -ENOMEM;
+	case ESP_ERR_NOT_FOUND:
+		return -ENODEV;
+	case ESP_ERR_TIMEOUT:
+		return -ETIMEDOUT;
+	case ESP_ERR_NOT_SUPPORTED:
+		return -ENOTSUP;
+	default:
+		return -EIO;
+	}
+}
 
 static int setup_battery_adc(void)
 {
-	int ret;
+	uint32_t clock_src_hz = 0;
+	adc_oneshot_hal_chan_cfg_t channel_cfg = {
+		.atten = BATTERY_ADC_ATTEN,
+		.bitwidth = BATTERY_ADC_BITWIDTH,
+	};
+	adc_cali_line_fitting_config_t cali_cfg = {
+		.unit_id = BATTERY_ADC_UNIT,
+		.atten = BATTERY_ADC_ATTEN,
+		.bitwidth = BATTERY_ADC_BITWIDTH,
+#if CONFIG_IDF_TARGET_ESP32
+		.default_vref = BATTERY_ADC_DEFAULT_VREF_MV,
+#endif
+	};
+	esp_err_t err;
 
-	if (!adc_is_ready_dt(&battery_adc)) {
-		LOG_WRN("battery ADC unavailable: %s is not ready", battery_adc.dev->name);
-		return -ENODEV;
+	err = esp_clk_tree_src_get_freq_hz(ADC_DIGI_CLK_SRC_DEFAULT,
+					   ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED,
+					   &clock_src_hz);
+	if (err != ESP_OK) {
+		LOG_WRN("battery ADC clock setup failed: 0x%x", err);
+		return esp_err_to_errno(err);
 	}
 
-	ret = adc_channel_setup_dt(&battery_adc);
-	if (ret != 0) {
-		LOG_WRN("battery ADC channel setup failed: %d", ret);
-		return ret;
+	adc_oneshot_hal_cfg_t hal_cfg = {
+		.unit = BATTERY_ADC_UNIT,
+		.work_mode = ADC_HAL_SINGLE_READ_MODE,
+		.clk_src = ADC_DIGI_CLK_SRC_DEFAULT,
+		.clk_src_freq_hz = clock_src_hz,
+	};
+
+	adc_oneshot_hal_init(&battery_adc_hal, &hal_cfg);
+	adc_oneshot_hal_channel_config(&battery_adc_hal, &channel_cfg,
+				       BATTERY_ADC_CHANNEL);
+	sar_periph_ctrl_adc_oneshot_power_acquire();
+
+	err = adc_cali_create_scheme_line_fitting(&cali_cfg, &battery_adc_cali);
+	if (err == ESP_OK) {
+		battery_calibrated = true;
+	} else {
+		LOG_WRN("battery ADC calibration unavailable: 0x%x", err);
 	}
 
 	battery_ready = true;
-	LOG_INF("battery voltage monitor ready: %s channel %u (IO34)",
-		battery_adc.dev->name, battery_adc.channel_id);
-
+	LOG_INF("battery voltage monitor ready: ESP HAL ADC1 channel 6 (IO34), "
+		"12 dB attenuation, calibration %s, clock %u Hz",
+		battery_calibrated ? "enabled" : "unavailable", clock_src_hz);
 	return 0;
 }
 
-#endif
-
 int tracker_power_monitor_init(void)
 {
-#if DT_NODE_HAS_STATUS(BATTERY_ADC_NODE, okay) && DT_NODE_EXISTS(BATTERY_ADC_CHANNEL_NODE)
 	return setup_battery_adc();
-#else
-	LOG_WRN("battery voltage monitor unavailable: missing ADC channel node");
-	return -ENODEV;
-#endif
 }
 
 int tracker_power_monitor_read_battery_sample(struct tracker_battery_sample *sample)
 {
-#if DT_NODE_HAS_STATUS(BATTERY_ADC_NODE, okay) && DT_NODE_EXISTS(BATTERY_ADC_CHANNEL_NODE)
-	int16_t raw_sample = 0;
+	int raw_sample;
 	int32_t pin_mv;
 	int64_t scaled_mv;
-	struct adc_sequence sequence = {
-		.buffer = &raw_sample,
-		.buffer_size = sizeof(raw_sample),
-	};
-	int ret;
+	esp_err_t err;
 
 	if (sample == NULL) {
 		return -EINVAL;
@@ -91,37 +130,34 @@ int tracker_power_monitor_read_battery_sample(struct tracker_battery_sample *sam
 		return -ENODEV;
 	}
 
-	ret = adc_sequence_init_dt(&battery_adc, &sequence);
-	if (ret != 0) {
-		return ret;
+	adc_oneshot_hal_setup(&battery_adc_hal, BATTERY_ADC_CHANNEL);
+#if SOC_ADC_CALIBRATION_V1_SUPPORTED
+	adc_set_hw_calibration_code(BATTERY_ADC_UNIT, BATTERY_ADC_ATTEN);
+#endif
+	if (!adc_oneshot_hal_convert(&battery_adc_hal, &raw_sample)) {
+		return -EIO;
 	}
-
-	ret = adc_read_dt(&battery_adc, &sequence);
-	if (ret != 0) {
-		return ret;
-	}
-
-	if (raw_sample < 0) {
+	if (raw_sample < 0 || raw_sample > UINT16_MAX) {
 		return -ERANGE;
 	}
 	sample->raw = (uint16_t)raw_sample;
 	sample->raw_valid = true;
 
-	pin_mv = raw_sample;
-	ret = adc_raw_to_millivolts_dt(&battery_adc, &pin_mv);
-	if (ret != 0) {
-		return ret;
+	if (!battery_calibrated) {
+		return 0;
 	}
+
+	err = adc_cali_raw_to_voltage(battery_adc_cali, raw_sample, &pin_mv);
+	if (err != ESP_OK) {
+		return esp_err_to_errno(err);
+	}
+
 	if (pin_mv < 0 || pin_mv > UINT16_MAX) {
 		return -ERANGE;
 	}
 
 	sample->pin_mv = (uint16_t)pin_mv;
 	sample->pin_mv_valid = true;
-	if (pin_mv >= BATTERY_ADC_SATURATED_PIN_MV) {
-		sample->saturated = true;
-		return 0;
-	}
 
 	scaled_mv = ((int64_t)pin_mv * BATTERY_DIVIDER_NUMERATOR +
 		     (BATTERY_DIVIDER_DENOMINATOR / 2)) /
@@ -132,13 +168,7 @@ int tracker_power_monitor_read_battery_sample(struct tracker_battery_sample *sam
 
 	sample->battery_mv = (uint16_t)scaled_mv;
 	sample->battery_mv_valid = true;
-
 	return 0;
-#else
-	ARG_UNUSED(sample);
-
-	return -ENODEV;
-#endif
 }
 
 int tracker_power_monitor_read_battery_mv(uint16_t *battery_mv)

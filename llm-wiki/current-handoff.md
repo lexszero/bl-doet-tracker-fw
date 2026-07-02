@@ -1,6 +1,6 @@
 # Current Handoff
 
-Last updated: 2026-07-01.
+Last updated: 2026-07-02.
 
 This page is public/GitHub-safe. Shared operational bench/backend details belong in ignored development-group notes under `llm-wiki/private/dev-group/`; local machine and Codex process state belongs under `llm-wiki/private/personal-agent/`.
 
@@ -83,18 +83,23 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - ADR is disabled at LoRaWAN start for now, matching the current moving-tracker hypothesis that ADR can leave the device with stale RF settings after moving away from the gateway.
 - Position uplinks now use a periodic confirmed message as a link check. The current interval is `600 s`; other position uplinks remain unconfirmed.
 - Confirmed uplink timeouts no longer immediately mark the local LoRaWAN session down. Confirmed attempts are rate-limited by attempt time; hard repeated send failures still trigger rejoin handling.
-- If the local LoRaWAN link is marked down and cannot recover for `30 min`, the firmware performs a cold reboot to reset radio/MAC state.
-- Local diagnostic records are now version `6` and `48` bytes. Fields capture:
+- The earlier `30 min` reboot fallback has been replaced by a staged recovery watchdog:
+  - repeated hard position-send failures mark the link down and force the LoRaWAN thread back into join/rejoin handling;
+  - the main loop keeps processing GNSS and diagnostic records while not joined;
+  - if the tracker has usable GNSS but remains unjoined for `1 h`, it performs a last-resort cold reboot;
+  - if a marked-down link remains unrecovered for `6 h`, it also performs a last-resort cold reboot.
+- Local diagnostic records are now version `7` and `48` bytes. Version `7` keeps the version `6` binary layout and adds explicit LoRaWAN link-event result codes. Fields capture:
   - current LoRaWAN datarate when the stack reports one;
   - whether ADR was enabled;
   - whether the uplink was confirmed;
   - last downlink RSSI/SNR when a downlink callback has been observed;
-  - IO34 battery voltage in millivolts when the ADC conversion is in range;
-  - IO34 ADC pin millivolts and a saturation flag when the ADC conversion is clipped.
+  - IO34 battery voltage in millivolts;
+  - IO34 ADC pin millivolts and a saturation flag field retained for clipped/fallback readings.
+- Link-event records now cover boot, init attempt/result, join attempt/result, link marked down, recovery wait, and last-resort reboot. The host decoder labels records as `position` or `link_event` and avoids plotting locationless link events at `0,0`.
 - Zephyr's public LoRaWAN API used here does not expose current TX power directly, so receiver-side RSSI/SNR plus datarate/ADR/downlink information is the current observable proxy.
-- Battery-voltage monitoring is diagnostic-only data. Local code reads ESP32 IO34 / ADC1 channel 6 with the TrackerD-LS schematic's `100k` / `470k` divider scale when the ADC conversion is in range. A live external measurement around `4.09 V` showed the current calibrated ESP32 ADC conversion path can saturate; saturated readings are no longer reported as valid pack voltage.
+- Battery-voltage monitoring is diagnostic-only data. The TrackerD-LS v1.3 schematic confirms `BAT+ -> 100k -> IO34/PA2 -> 470k -> GND`, so the firmware scales IO34 by `(100 + 470) / 470`. Stock Tracker_109 reports about `4002 mV`; the Zephyr ADC helper path clipped at about `3088 mV` pack voltage. The current experimental firmware bypasses Zephyr's clipped millivolt helper and reads IO34 with the ESP HAL ADC path plus Espressif line-fitting calibration.
 - The LoRaWAN position payload is unchanged.
-- The host diagnostic decoder was updated to read old `40` byte v1 records and `48` byte v2/v3/v4/v5/v6 records.
+- The host diagnostic decoder was updated to read old `40` byte v1 records and `48` byte v2/v3/v4/v5/v6/v7 records.
 - The ChirpStack live-map script now also preserves frequency and LoRa modulation metadata when the application event includes it.
 - The live-map script supports multiple DevEUIs, writes `latest_by_device.json` and `device_events.json`, colors devices separately, and defaults the browser view to decoded positions from the last 24 hours. `device_events.json` shows latest join/uplink events even when a payload is not decoded as a current firmware position point. The 24 hour filter is a view filter only; retained JSON/CSV/GeoJSON history still follows `--max-points`.
 - Local validation completed:
@@ -112,15 +117,26 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
   - one confirmed active position uplink;
   - zero `FATAL`, `ASSERT`, `lorawan_send failed`, or `position uplink failed` markers in the filtered capture.
 - New v4 diagnostic records were dumped and decoded. Two comparison records showed GPIO35 near ground and GPIO34 in the expected battery-sense range; GPIO34 is the useful battery-voltage path.
-- The TrackerD-LS v1.3 schematic confirms IO34 as the battery ADC path with a `100k` / `470k` divider. The current v6 diagnostic format keeps `battery_mv` only for in-range readings and adds `battery_pin_mv` plus `battery_saturated`.
 - The local v6 build passed. Generated `zephyr.bin` size was `258048` bytes, SHA256 `C61929741707486AF4396A5B6941EB30551A9210226CD35BA79470C8231BD001`.
 - The v6 image has now been flashed to one provisioned development tracker, preserving settings. A short boot capture showed settings loaded, diagnostic log ready, IO34 battery monitor ready, ADR disabled, OTAA join success, and datarate `DR_0`. Exact device mapping and bench paths are private.
+- The newer ESP-HAL ADC experiment build passed and was flashed to another provisioned development tracker. Boot capture showed `raw=4095`, IO34 `3441 mV`, scaled battery `4173 mV`, GNSS fix, OTAA join, downlink, and a confirmed port `4` position uplink. Exact device mapping and bench paths are private.
+- The v7 link-recovery build passed on 2026-07-02. Generated `zephyr.bin` size was `258048` bytes, SHA256 `DF87D3B1FDF2536FF92DD1C23F7470BC5231A2A7E4DAAE91964685D6D7064012`.
+- The v7 image was flashed app-only to the permanent bench tracker, preserving settings. A short boot capture showed settings loaded, diagnostic log ready, IO34 battery monitor ready, GNSS fix, OTAA join success, downlink callback, datarate `DR_0`, and one confirmed port `4` position uplink. No `FATAL`, `ASSERT`, send-failure, or last-resort reboot markers appeared in the filtered capture.
+- A post-flash diagnostic dump decoded successfully. The partition still contained older records, but the new v7 records included `link_boot`, `link_init_attempt`, `link_init_ok`, `link_join_attempt`, `link_recovery_wait`, `link_join_success`, `not_joined`, and `sent` records, confirming that link-state events and normal position records decode together.
 - Additional stock TrackerD-LS units are now on the bench. Exact USB serials, ChirpStack mapping observations, stock backup details, and flash cautions are documented only in ignored private development-group notes.
 
 ## Next Best Steps
 
-1. Run another movement test and decode the diagnostic log.
-2. Check whether send failures are now rate-limited and whether confirmed link checks produce downlink/RF evidence.
-3. Tune motion thresholds only after reviewing real movement traces.
-4. Decide later whether the LoRaWAN payload should include speed or whether speed should remain diagnostic-log-only.
-5. Keep public docs sanitized; keep bench/backend runbooks and personal agent state in ignored private notes.
+1. Use one tracker as a permanent bench/recovery-test target and one tracker as the daily movement/poor-coverage test target.
+2. Before each run, note the expected gateway condition and avoid unnecessary resets.
+3. After each run, compare receiver-side events against the local diagnostic dump:
+   - local `sent` plus receiver point means normal path;
+   - local `sent` without receiver point points to RF/gateway/backend visibility;
+   - `send_failed` points to local LoRaWAN send failure;
+   - `not_joined` plus `link_recovery_wait` means recovery is active while the main loop still runs;
+   - no new local records points to firmware, GNSS event flow, flash write, or power.
+4. Run a gateway-off / poor-coverage test and decode the diagnostic log to confirm that GNSS handling and diagnostic logging continue while not joined.
+5. Check whether send failures are rate-limited and whether confirmed link checks produce downlink/RF evidence.
+6. Tune motion thresholds only after reviewing real movement traces.
+7. Decide later whether the LoRaWAN payload should include speed or whether speed should remain diagnostic-log-only.
+8. Keep public docs sanitized; keep bench/backend runbooks and personal agent state in ignored private notes.

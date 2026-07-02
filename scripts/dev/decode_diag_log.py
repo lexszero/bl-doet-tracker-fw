@@ -29,12 +29,14 @@ VERSION_V3 = 3
 VERSION_V4 = 4
 VERSION_V5 = 5
 VERSION_V6 = 6
+VERSION_V7 = 7
 RECORD_SIZE_V1 = 40
 RECORD_SIZE_V2 = 48
 RECORD_SIZE_V3 = 48
 RECORD_SIZE_V4 = 48
 RECORD_SIZE_V5 = 48
 RECORD_SIZE_V6 = 48
+RECORD_SIZE_V7 = 48
 SECTOR_SIZE = 4096
 RECORD_STRUCT_V1 = struct.Struct("<HBBIIIiiHHHhBBBBHH")
 RECORD_STRUCT_V2 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
@@ -42,6 +44,7 @@ RECORD_STRUCT_V3 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 RECORD_STRUCT_V4 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 RECORD_STRUCT_V5 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 RECORD_STRUCT_V6 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
+RECORD_STRUCT_V7 = struct.Struct("<HBBIIIiiHHHhBBBBBBhbBHHH")
 
 MOTION_STATES = {
     0: "unknown",
@@ -55,7 +58,19 @@ RESULTS = {
     2: "send_failed",
     3: "not_joined",
     4: "no_fix",
+    16: "link_boot",
+    17: "link_init_attempt",
+    18: "link_init_failed",
+    19: "link_init_ok",
+    20: "link_join_attempt",
+    21: "link_join_failed",
+    22: "link_join_success",
+    23: "link_marked_down",
+    24: "link_recovery_wait",
+    25: "link_reboot_last_resort",
 }
+
+LINK_EVENT_RESULTS = set(range(16, 26))
 
 FLAG_ACCEL_VALID = 1 << 0
 FLAG_ACCEL_MOVING = 1 << 1
@@ -127,6 +142,16 @@ class Record:
     @property
     def result_name(self) -> str:
         return RESULTS.get(self.result, f"unknown_{self.result}")
+
+    @property
+    def is_link_event(self) -> bool:
+        return self.result in LINK_EVENT_RESULTS
+
+    @property
+    def has_location(self) -> bool:
+        if self.result_name == "no_fix":
+            return False
+        return self.latitude != 0 or self.longitude != 0
 
 
 def crc16_ccitt(data: bytes) -> int:
@@ -475,9 +500,15 @@ def parse_record_v5(raw: bytes, offset: int) -> Record | None:
     )
 
 
-def parse_record_v6(raw: bytes, offset: int) -> Record | None:
-    chunk = raw[offset : offset + RECORD_SIZE_V6]
-    if len(chunk) != RECORD_SIZE_V6 or chunk == b"\xff" * RECORD_SIZE_V6:
+def parse_record_v6_like(
+    raw: bytes,
+    offset: int,
+    expected_version: int,
+    expected_record_size: int,
+    record_struct: struct.Struct,
+) -> Record | None:
+    chunk = raw[offset : offset + expected_record_size]
+    if len(chunk) != expected_record_size or chunk == b"\xff" * expected_record_size:
         return None
 
     (
@@ -505,9 +536,9 @@ def parse_record_v6(raw: bytes, offset: int) -> Record | None:
         battery_mv,
         battery_pin_mv,
         crc16,
-    ) = RECORD_STRUCT_V6.unpack(chunk)
+    ) = record_struct.unpack(chunk)
 
-    if magic != MAGIC or version != VERSION_V6 or record_size != RECORD_SIZE_V6:
+    if magic != MAGIC or version != expected_version or record_size != expected_record_size:
         return None
 
     if crc16_ccitt(chunk[:46]) != crc16:
@@ -543,6 +574,14 @@ def parse_record_v6(raw: bytes, offset: int) -> Record | None:
     )
 
 
+def parse_record_v6(raw: bytes, offset: int) -> Record | None:
+    return parse_record_v6_like(raw, offset, VERSION_V6, RECORD_SIZE_V6, RECORD_STRUCT_V6)
+
+
+def parse_record_v7(raw: bytes, offset: int) -> Record | None:
+    return parse_record_v6_like(raw, offset, VERSION_V7, RECORD_SIZE_V7, RECORD_STRUCT_V7)
+
+
 def parse_dump(path: Path) -> list[Record]:
     raw = path.read_bytes()
     found: dict[tuple[int, int], Record] = {}
@@ -569,6 +608,10 @@ def parse_dump(path: Path) -> list[Record]:
 
     for offset in iter_record_offsets(len(raw), RECORD_SIZE_V6):
         if (record := parse_record_v6(raw, offset)) is not None:
+            found[(record.offset, record.record_version)] = record
+
+    for offset in iter_record_offsets(len(raw), RECORD_SIZE_V7):
+        if (record := parse_record_v7(raw, offset)) is not None:
             found[(record.offset, record.record_version)] = record
 
     return sorted(found.values(), key=lambda record: (record.seq, record.record_version))
@@ -622,11 +665,13 @@ def record_to_row(record: Record) -> dict[str, object]:
     pin_battery = battery_pin_mv(record)
     return {
         "record_version": record.record_version,
+        "record_kind": "link_event" if record.is_link_event else "position",
         "seq": record.seq,
         "offset_hex": f"0x{record.offset:05x}",
         "uptime_ms": record.uptime_ms,
         "uptime_s": f"{record.uptime_ms / 1000:.3f}",
         "utc": record.utc_iso,
+        "has_location": record.has_location,
         "lat": f"{record.lat_deg:.9f}",
         "lon": f"{record.lon_deg:.9f}",
         "speed_m_s": f"{record.speed_m_s:.2f}",
@@ -679,7 +724,7 @@ def write_geojson(records: list[Record], path: Path) -> None:
     for record in records:
         row = record_to_row(record)
         geometry = None
-        if record.result_name != "no_fix":
+        if record.has_location:
             geometry = {
                 "type": "Point",
                 "coordinates": [record.lon_deg, record.lat_deg],
@@ -728,6 +773,8 @@ def write_html_map(records: list[Record], path: Path, neighbourhoods_geojson: di
             "interval_s": record.interval_s,
             "motion_state": record.motion_name,
             "result": record.result_name,
+            "record_kind": "link_event" if record.is_link_event else "position",
+            "has_location": record.has_location,
             "satellites": record.satellites,
             "send_ret": record.send_ret,
             "record_version": record.record_version,
@@ -818,6 +865,7 @@ def write_html_map(records: list[Record], path: Path, neighbourhoods_geojson: di
       <div><span class="dot" style="background:#16a34a"></span>stationary</div>
       <div><span class="dot" style="background:#dc2626"></span>send failed</div>
       <div><span class="dot" style="background:#7c3aed"></span>not joined</div>
+      <div><span class="dot" style="background:#0f766e"></span>link event</div>
       <div><span class="dot" style="background:#6b7280"></span>no GPS fix / heartbeat</div>
     </div>
   </div>
@@ -854,6 +902,9 @@ def write_html_map(records: list[Record], path: Path, neighbourhoods_geojson: di
     const colorFor = (point) => {{
       if (point.result === 'send_failed') return '#dc2626';
       if (point.result === 'not_joined') return '#7c3aed';
+      if (point.result === 'link_reboot_last_resort') return '#991b1b';
+      if (point.result === 'link_marked_down') return '#be123c';
+      if (point.record_kind === 'link_event') return '#0f766e';
       if (point.motion_state === 'moving') return '#2563eb';
       if (point.motion_state === 'active') return '#f59e0b';
       if (point.motion_state === 'stationary') return '#16a34a';
@@ -1007,7 +1058,7 @@ def write_html_map(records: list[Record], path: Path, neighbourhoods_geojson: di
 
     const latLngs = [];
     for (const point of points) {{
-      if (point.result === 'no_fix') continue;
+      if (!point.has_location) continue;
       if (!Number.isFinite(point.lat) || !Number.isFinite(point.lon)) continue;
       latLngs.push([point.lat, point.lon]);
       const popup = `
@@ -1017,6 +1068,7 @@ def write_html_map(records: list[Record], path: Path, neighbourhoods_geojson: di
         Speed: ${{point.speed_kmh}} km/h<br>
         Interval: ${{point.interval_s}} s<br>
         State: ${{point.motion_state}}<br>
+        Kind: ${{point.record_kind}}<br>
         Result: ${{point.result}} (${{point.send_ret}})<br>
         Type: ${{point.confirmed ? 'confirmed' : 'unconfirmed'}}<br>
         DR: ${{point.lorawan_dr ?? 'n/a'}} ADR: ${{point.adr_enabled ? 'on' : 'off'}}<br>
@@ -1071,7 +1123,15 @@ def main() -> int:
         "--record-version",
         type=int,
         action="append",
-        choices=[VERSION_V1, VERSION_V2, VERSION_V3, VERSION_V4, VERSION_V5],
+        choices=[
+            VERSION_V1,
+            VERSION_V2,
+            VERSION_V3,
+            VERSION_V4,
+            VERSION_V5,
+            VERSION_V6,
+            VERSION_V7,
+        ],
         default=None,
         help=(
             "Only emit records with this diagnostic record version. "
