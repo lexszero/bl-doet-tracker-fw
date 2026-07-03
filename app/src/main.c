@@ -12,7 +12,6 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/atomic.h>
-#include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
 #include <app_version.h>
@@ -38,13 +37,14 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_FAILURES_BEFORE_REJOIN 3
 #define POSITION_UPLINK_PORT 4
 #define POSITION_STALE_HDOP UINT16_MAX
-#define LORAWAN_GOOD_GNSS_REBOOT_AFTER_MS 3600000
-#define LORAWAN_LINK_REBOOT_LAST_RESORT_MS 21600000
 #define LORAWAN_RECOVERY_LOG_INTERVAL_MS 900000
 #define DIAGNOSTIC_HEARTBEAT_INTERVAL_MS POSITION_UPLINK_STATIONARY_INTERVAL_MS
 
 #define LORAWAN_JOIN_RETRY_MIN_MS 15000
 #define LORAWAN_JOIN_RETRY_MAX_MS 300000
+#define LORAWAN_JOIN_RETRY_ACTIVE_MAX_MS 60000
+#define LORAWAN_JOIN_RETRY_MOVING_MAX_MS 30000
+#define LORAWAN_JOIN_RETRY_POLL_MS 1000
 #define LORAWAN_LINK_THREAD_STACK_SIZE 4096
 #define LORAWAN_LINK_THREAD_PRIORITY 7
 
@@ -66,7 +66,7 @@ static atomic_t consecutive_position_send_failures;
 static int64_t last_uplink_attempt_timestamp;
 static int64_t last_confirmed_uplink_timestamp;
 static bool have_attempted_position;
-static bool lorawan_reboot_armed;
+static bool lorawan_recovery_armed;
 static int64_t lorawan_link_down_timestamp;
 static int64_t lorawan_good_gnss_unjoined_timestamp;
 static int64_t lorawan_last_recovery_log_timestamp;
@@ -100,7 +100,6 @@ enum tracker_lorawan_link_state {
 	TRACKER_LORAWAN_LINK_JOINED,
 	TRACKER_LORAWAN_LINK_REJOINING,
 	TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF,
-	TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT,
 };
 
 struct accel_motion_sample {
@@ -167,8 +166,6 @@ static const char *lorawan_link_state_name(enum tracker_lorawan_link_state state
 		return "rejoining";
 	case TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF:
 		return "offline_backoff";
-	case TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT:
-		return "reboot_last_resort";
 	default:
 		return "unknown";
 	}
@@ -208,7 +205,7 @@ static void lorawan_note_position_send_failure(int ret,
 		lorawan_set_link_state(TRACKER_LORAWAN_LINK_REJOINING);
 		lorawan_link_down_timestamp = now;
 		lorawan_last_recovery_log_timestamp = now;
-		lorawan_reboot_armed = true;
+		lorawan_recovery_armed = true;
 		log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_MARKED_DOWN, ret, 0,
 				  message_type);
 	}
@@ -494,6 +491,47 @@ static uint32_t uplink_interval_ms_for_motion(enum tracker_motion_state state)
 	default:
 		return POSITION_UPLINK_ACTIVE_INTERVAL_MS;
 	}
+}
+
+static uint32_t lorawan_join_retry_cap_ms(void)
+{
+	switch (motion_state) {
+	case TRACKER_MOTION_MOVING:
+		return LORAWAN_JOIN_RETRY_MOVING_MAX_MS;
+	case TRACKER_MOTION_ACTIVE:
+		return LORAWAN_JOIN_RETRY_ACTIVE_MAX_MS;
+	case TRACKER_MOTION_STATIONARY:
+	case TRACKER_MOTION_UNKNOWN:
+	default:
+		return LORAWAN_JOIN_RETRY_MAX_MS;
+	}
+}
+
+static uint32_t lorawan_effective_join_retry_delay_ms(uint32_t retry_delay_ms)
+{
+	return MIN(retry_delay_ms, lorawan_join_retry_cap_ms());
+}
+
+static uint32_t lorawan_sleep_join_retry_delay(uint32_t retry_delay_ms)
+{
+	uint32_t slept_ms = 0;
+
+	while (slept_ms < retry_delay_ms && !lorawan_is_joined()) {
+		uint32_t effective_delay_ms =
+			lorawan_effective_join_retry_delay_ms(retry_delay_ms);
+		uint32_t sleep_ms;
+
+		if (slept_ms >= effective_delay_ms) {
+			break;
+		}
+
+		sleep_ms = MIN(effective_delay_ms - slept_ms,
+			       (uint32_t)LORAWAN_JOIN_RETRY_POLL_MS);
+		k_sleep(K_MSEC(sleep_ms));
+		slept_ms += sleep_ms;
+	}
+
+	return slept_ms;
 }
 
 static void log_position_uplink_decision_for_payload(int64_t now,
@@ -916,35 +954,22 @@ static void lorawan_recovery_watchdog(void)
 				(long long)good_gnss_unjoined_elapsed,
 				lorawan_link_state_name(lorawan_get_link_state()));
 		}
-
-		if (good_gnss_unjoined_elapsed >= LORAWAN_GOOD_GNSS_REBOOT_AFTER_MS) {
-			lorawan_set_link_state(TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT);
-			log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_REBOOT_LAST_RESORT,
-					  -ETIMEDOUT,
-					  i64_to_u32_saturated(good_gnss_unjoined_elapsed),
-					  LORAWAN_MSG_UNCONFIRMED);
-			LOG_ERR("LoRaWAN not joined for %lld ms with usable GNSS; rebooting as last resort",
-				(long long)good_gnss_unjoined_elapsed);
-			k_sleep(K_MSEC(250));
-			sys_reboot(SYS_REBOOT_COLD);
-		}
 	}
 
-	if (!lorawan_reboot_armed || lorawan_link_down_timestamp <= 0) {
+	if (!lorawan_recovery_armed || lorawan_link_down_timestamp <= 0) {
 		return;
 	}
 
 	link_down_elapsed = now - lorawan_link_down_timestamp;
-	if (link_down_elapsed >= LORAWAN_LINK_REBOOT_LAST_RESORT_MS) {
-		lorawan_set_link_state(TRACKER_LORAWAN_LINK_REBOOT_LAST_RESORT);
-		log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_REBOOT_LAST_RESORT,
-				  -ETIMEDOUT,
+	if (now - lorawan_last_recovery_log_timestamp >=
+	    LORAWAN_RECOVERY_LOG_INTERVAL_MS) {
+		lorawan_last_recovery_log_timestamp = now;
+		log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_RECOVERY_WAIT,
+				  -ENOTCONN,
 				  i64_to_u32_saturated(link_down_elapsed),
 				  LORAWAN_MSG_UNCONFIRMED);
-		LOG_ERR("LoRaWAN link unrecovered for %lld ms; rebooting as long-horizon last resort",
+		LOG_WRN("LoRaWAN link unrecovered for %lld ms; continuing rejoin attempts without reboot",
 			(long long)link_down_elapsed);
-		k_sleep(K_MSEC(250));
-		sys_reboot(SYS_REBOOT_COLD);
 	}
 }
 
@@ -959,6 +984,7 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 
 	while (1) {
 		int ret;
+		uint32_t effective_retry_delay_ms;
 
 		if (!initialized) {
 			int64_t now = k_uptime_get();
@@ -994,11 +1020,13 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 			continue;
 		}
 
-		lorawan_set_link_state(lorawan_reboot_armed ?
+		lorawan_set_link_state(lorawan_recovery_armed ?
 				       TRACKER_LORAWAN_LINK_REJOINING :
 				       TRACKER_LORAWAN_LINK_JOINING);
+		effective_retry_delay_ms =
+			lorawan_effective_join_retry_delay_ms(retry_delay_ms);
 		log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_JOIN_ATTEMPT,
-				  0, retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
+				  0, effective_retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
 		LOG_INF("LoRaWAN join attempt");
 		led_status_blink_continuous(LED_B, 100, 100, 3, 0);
 
@@ -1008,7 +1036,7 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 			lorawan_set_link_state(TRACKER_LORAWAN_LINK_JOINED);
 			atomic_set(&consecutive_position_send_failures, 0);
 			last_confirmed_uplink_timestamp = 0;
-			lorawan_reboot_armed = false;
+			lorawan_recovery_armed = false;
 			lorawan_link_down_timestamp = 0;
 			lorawan_good_gnss_unjoined_timestamp = 0;
 			lorawan_last_recovery_log_timestamp = 0;
@@ -1027,9 +1055,18 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 		}
 
 		lorawan_set_link_state(TRACKER_LORAWAN_LINK_OFFLINE_BACKOFF);
+		effective_retry_delay_ms =
+			lorawan_effective_join_retry_delay_ms(retry_delay_ms);
 		log_lorawan_event(k_uptime_get(), DIAGNOSTIC_LOG_LINK_JOIN_FAILED,
-				  ret, retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
-		LOG_WRN("LoRaWAN join failed: %d; retry in %u ms", ret, retry_delay_ms);
+				  ret, effective_retry_delay_ms, LORAWAN_MSG_UNCONFIRMED);
+		if (effective_retry_delay_ms < retry_delay_ms) {
+			LOG_WRN("LoRaWAN join failed: %d; retry in %u ms while %s (base %u ms)",
+				ret, effective_retry_delay_ms,
+				motion_state_name(motion_state), retry_delay_ms);
+		} else {
+			LOG_WRN("LoRaWAN join failed: %d; retry in %u ms",
+				ret, retry_delay_ms);
+		}
 		led_status_on(LED_B);
 		k_sleep(K_MSEC(500));
 		led_status_off(LED_B);
@@ -1037,7 +1074,7 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 		k_sleep(K_MSEC(500));
 		led_status_off(LED_R);
 
-		k_sleep(K_MSEC(retry_delay_ms));
+		(void)lorawan_sleep_join_retry_delay(retry_delay_ms);
 		retry_delay_ms = MIN(retry_delay_ms * 2U, LORAWAN_JOIN_RETRY_MAX_MS);
 	}
 }

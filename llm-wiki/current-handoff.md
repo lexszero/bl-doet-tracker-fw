@@ -1,6 +1,6 @@
 # Current Handoff
 
-Last updated: 2026-07-02.
+Last updated: 2026-07-03.
 
 This page is public/GitHub-safe. Shared operational bench/backend details belong in ignored development-group notes under `llm-wiki/private/dev-group/`; local machine and Codex process state belongs under `llm-wiki/private/personal-agent/`.
 
@@ -84,11 +84,16 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - ADR is disabled at LoRaWAN start for now, matching the current moving-tracker hypothesis that ADR can leave the device with stale RF settings after moving away from the gateway.
 - Position uplinks now use a periodic confirmed message as a link check. The current interval is `600 s`; other position uplinks remain unconfirmed.
 - Confirmed uplink timeouts no longer immediately mark the local LoRaWAN session down. Confirmed attempts are rate-limited by attempt time; hard repeated send failures still trigger rejoin handling.
-- The earlier `30 min` reboot fallback has been replaced by a staged recovery watchdog:
+- The earlier `30 min` reboot fallback has been replaced by staged recovery handling:
   - repeated hard position-send failures mark the link down and force the LoRaWAN thread back into join/rejoin handling;
   - the main loop keeps processing GNSS and diagnostic records while not joined;
-  - if the tracker has usable GNSS but remains unjoined for `1 h`, it performs a last-resort cold reboot;
-  - if a marked-down link remains unrecovered for `6 h`, it also performs a last-resort cold reboot.
+  - software last-resort reboots for LoRaWAN non-join/non-recovery are currently disabled;
+  - recovery wait records are still logged periodically so long no-link periods remain visible.
+- LoRaWAN join retry backoff is now motion-aware:
+  - normal stationary/unknown retry backoff still grows up to `300 s`;
+  - active motion caps retry delay at `60 s`;
+  - moving caps retry delay at `30 s`;
+  - the retry sleep checks motion in short chunks, so movement can shorten an already-running long backoff.
 - Local diagnostic records are now version `7` and `48` bytes. Version `7` keeps the version `6` binary layout and adds explicit LoRaWAN link-event result codes. Fields capture:
   - current LoRaWAN datarate when the stack reports one;
   - whether ADR was enabled;
@@ -96,7 +101,7 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
   - last downlink RSSI/SNR when a downlink callback has been observed;
   - IO34 battery voltage in millivolts;
   - IO34 ADC pin millivolts and a saturation flag field retained for clipped/fallback readings.
-- Link-event records now cover boot, init attempt/result, join attempt/result, link marked down, recovery wait, and last-resort reboot. The host decoder labels records as `position` or `link_event` and avoids plotting locationless link events at `0,0`.
+- Link-event records now cover boot, init attempt/result, join attempt/result, link marked down, and recovery wait. Older logs may still contain last-resort reboot records. The host decoder labels records as `position` or `link_event` and avoids plotting locationless link events at `0,0`.
 - Zephyr's public LoRaWAN API used here does not expose current TX power directly, so receiver-side RSSI/SNR plus datarate/ADR/downlink information is the current observable proxy.
 - Battery-voltage monitoring is diagnostic-only data. The TrackerD-LS v1.3 schematic confirms `BAT+ -> 100k -> IO34/PA2 -> 470k -> GND`, so the firmware scales IO34 by `(100 + 470) / 470`. Stock Tracker_109 reports about `4002 mV`; the Zephyr ADC helper path clipped at about `3088 mV` pack voltage. The current experimental firmware bypasses Zephyr's clipped millivolt helper and reads IO34 with the ESP HAL ADC path plus Espressif line-fitting calibration.
 - The LoRaWAN position payload remains the same 10 byte binary layout, with `hdop=65535` reserved for stale/no-current-fix heartbeats using the last known usable position.
@@ -124,6 +129,7 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - The v7 link-recovery build passed on 2026-07-02. Generated `zephyr.bin` size was `258048` bytes, SHA256 `DF87D3B1FDF2536FF92DD1C23F7470BC5231A2A7E4DAAE91964685D6D7064012`.
 - The v7 image was flashed app-only to the permanent bench tracker, preserving settings. A short boot capture showed settings loaded, diagnostic log ready, IO34 battery monitor ready, GNSS fix, OTAA join success, downlink callback, datarate `DR_0`, and one confirmed port `4` position uplink. No `FATAL`, `ASSERT`, send-failure, or last-resort reboot markers appeared in the filtered capture.
 - A post-flash diagnostic dump decoded successfully. The partition still contained older records, but the new v7 records included `link_boot`, `link_init_attempt`, `link_init_ok`, `link_join_attempt`, `link_recovery_wait`, `link_join_success`, `not_joined`, and `sent` records, confirming that link-state events and normal position records decode together.
+- The motion-aware no-reboot recovery build passed on 2026-07-03. Generated `zephyr.bin` size was `258048` bytes, SHA256 `BBB02AD37AD5C4F057EF8A246FA18C28F70DE374F5320BFEF805D302169D387B`.
 - Additional stock TrackerD-LS units are now on the bench. Exact USB serials, ChirpStack mapping observations, stock backup details, and flash cautions are documented only in ignored private development-group notes.
 
 ## Next Best Steps

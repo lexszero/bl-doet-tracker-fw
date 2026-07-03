@@ -87,7 +87,7 @@ The firmware now includes `CONFIG_TRACKER_DIAGNOSTIC_LOG=y` by default. It appen
 - successful port `4` position sends;
 - failed port `4` position send attempts;
 - `not_joined` decisions, where GNSS/motion says the tracker would send a position at the selected interval, but LoRaWAN is not joined yet.
-- link lifecycle and recovery events such as boot, init, join attempts, join success/failure, link marked down, recovery wait, and last-resort reboot.
+- link lifecycle and recovery events such as boot, init, join attempts, join success/failure, link marked down, and recovery wait. Older decoded logs may also contain last-resort reboot events from firmware builds where that recovery action was still enabled.
 
 It intentionally does not log every GNSS fix. At a 1 Hz GNSS rate, internal flash would fill too quickly and would add unnecessary erase/write churn.
 
