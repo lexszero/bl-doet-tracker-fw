@@ -47,7 +47,7 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
 #define GNSS_GOOD_HDOP_MAX 2500
 #define GNSS_GOOD_SATELLITES_MIN 4
-#define GNSS_MOTION_SPEED_MM_S 500
+#define GNSS_DRIFT_SPEED_MM_S 500
 #define GNSS_STILL_ALTITUDE_JUMP_MM 5000
 #define GNSS_DRIFT_SUPPRESS_MS 60000
 
@@ -59,6 +59,7 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 static atomic_t lorawan_joined;
 static atomic_t lorawan_link_state;
 static atomic_t consecutive_position_send_failures;
+static atomic_t lorawan_reinit_requested;
 static int64_t last_uplink_attempt_timestamp;
 static int64_t last_confirmed_uplink_timestamp;
 static bool have_attempted_position;
@@ -187,6 +188,11 @@ static void lorawan_note_position_send_failure(int ret,
 		return;
 	}
 
+	if (ret == -ECONNREFUSED) {
+		LOG_WRN("LoRaWAN send restricted by duty-cycle; keeping current session");
+		return;
+	}
+
 	failures = atomic_inc(&consecutive_position_send_failures) + 1;
 	if (failures < POSITION_UPLINK_FAILURES_BEFORE_REJOIN) {
 		return;
@@ -202,6 +208,7 @@ static void lorawan_note_position_send_failure(int ret,
 		lorawan_link_down_timestamp = now;
 		lorawan_last_recovery_log_timestamp = now;
 		lorawan_recovery_armed = true;
+		atomic_set(&lorawan_reinit_requested, 1);
 		log_lorawan_event(now, DIAGNOSTIC_LOG_LINK_MARKED_DOWN, ret, 0,
 				  message_type);
 	}
@@ -406,7 +413,7 @@ static uint32_t filtered_gnss_speed_mm_s(const struct accel_motion_sample *accel
 	}
 
 	if (accel->valid && !accel->moving && have_last_gnss_altitude &&
-	    speed >= GNSS_MOTION_SPEED_MM_S &&
+	    speed >= GNSS_DRIFT_SPEED_MM_S &&
 	    altitude_delta > GNSS_STILL_ALTITUDE_JUMP_MM) {
 		gnss_drift_suppressed_until = now + GNSS_DRIFT_SUPPRESS_MS;
 	}
@@ -475,10 +482,8 @@ static enum tracker_motion_state update_motion_state(const struct accel_motion_s
 {
 	uint32_t speed = filtered_gnss_speed_mm_s(accel, now);
 	bool accel_motion_now = accel->valid && accel->moving;
-	bool speed_motion_now = speed >= GNSS_MOTION_SPEED_MM_S;
 
-	return update_motion_state_from_signal(accel, now, speed,
-					       accel_motion_now || speed_motion_now);
+	return update_motion_state_from_signal(accel, now, speed, accel_motion_now);
 }
 
 static uint32_t uplink_interval_ms_for_motion(enum tracker_motion_state state)
@@ -706,7 +711,8 @@ static void log_lorawan_event(int64_t now, uint8_t result, int ret,
 
 static void tracker_motion_init(void)
 {
-	last_motion_timestamp = k_uptime_get();
+	last_motion_timestamp = 0;
+	last_motion_resume_timestamp = 0;
 
 	if (accel_dev == NULL) {
 		LOG_WRN("accelerometer unavailable: no accel-0 alias");
@@ -982,6 +988,13 @@ static void lorawan_link_thread(void *arg1, void *arg2, void *arg3)
 	while (1) {
 		int ret;
 		uint32_t effective_retry_delay_ms;
+
+		if (!lorawan_is_joined() &&
+		    atomic_cas(&lorawan_reinit_requested, 1, 0)) {
+			LOG_WRN("LoRaWAN recovery requested; reinitializing MAC before join");
+			initialized = false;
+			retry_delay_ms = LORAWAN_JOIN_RETRY_MIN_MS;
+		}
 
 		if (!initialized) {
 			int64_t now = k_uptime_get();

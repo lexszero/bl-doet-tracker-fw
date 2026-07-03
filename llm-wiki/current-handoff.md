@@ -44,9 +44,9 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - Current intended intervals:
   - idle/stationary: `120 s`;
   - motion: `10 s`.
-- Motion cadence starts when the accelerometer detects motion or GNSS speed is at least `0.5 m/s` (`1.8 km/h`).
+- Motion cadence starts only when the accelerometer detects motion.
 - The motion timer is reset by each motion signal; after `30 s` without motion, cadence returns to idle.
-- Motion classification uses GNSS speed plus accelerometer data.
+- GNSS speed is still logged and can participate in drift/quality filtering, but it does not by itself switch the tracker into motion cadence.
 - Accelerometer handling is orientation-independent: it uses vector magnitude and vector delta, not a fixed `Z == gravity` assumption.
 - GNSS fixes are gated by satellite count and HDOP.
 - A drift guard suppresses stationary GNSS noise so parked GPS drift does not immediately look like real movement.
@@ -84,9 +84,9 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - The firmware has been updated locally so failed position sends consume the selected uplink cadence slot instead of retrying on every GNSS event.
 - ADR is disabled at LoRaWAN start for now, matching the current moving-tracker hypothesis that ADR can leave the device with stale RF settings after moving away from the gateway.
 - Position uplinks now use a periodic confirmed message as a link check. The current interval is `600 s`; other position uplinks remain unconfirmed.
-- Confirmed uplink timeouts no longer immediately mark the local LoRaWAN session down. Confirmed attempts are rate-limited by attempt time; hard repeated send failures still trigger rejoin handling.
+- Confirmed uplink timeouts no longer immediately mark the local LoRaWAN session down. Confirmed attempts are rate-limited by attempt time; local duty-cycle restriction (`-111` / `-ECONNREFUSED` from Zephyr's LoRaWAN API) is treated as back-pressure and does not mark the session down by itself. Other hard repeated send failures still trigger rejoin handling.
 - The earlier `30 min` reboot fallback has been replaced by staged recovery handling:
-  - repeated hard position-send failures mark the link down and force the LoRaWAN thread back into join/rejoin handling;
+  - repeated hard position-send failures mark the link down, request LoRaWAN MAC reinitialization, and force the LoRaWAN thread back into join/rejoin handling;
   - the main loop keeps processing GNSS and diagnostic records while not joined;
   - software last-resort reboots for LoRaWAN non-join/non-recovery are currently disabled;
   - recovery wait records are still logged periodically so long no-link periods remain visible.

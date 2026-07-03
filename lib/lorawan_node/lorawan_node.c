@@ -25,6 +25,7 @@ static struct lorawan_downlink_cb downlink_cb = {
 	.port = LW_RECV_PORT_ANY,
 	.cb = dl_callback
 };
+static bool callbacks_registered;
 
 static void dl_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			const uint8_t *hex_data)
@@ -95,7 +96,10 @@ int lorawan_node_init(void)
 		LOG_WRN("lorawan_set_conf_msg_tries failed: %d", ret);
 	}
 
-	lorawan_register_downlink_callback(&downlink_cb);
+	if (!callbacks_registered) {
+		lorawan_register_downlink_callback(&downlink_cb);
+		callbacks_registered = true;
+	}
 	lorawan_register_dr_changed_callback(lorwan_datarate_changed);
 
 	return 0;
