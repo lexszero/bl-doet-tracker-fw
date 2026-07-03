@@ -120,9 +120,8 @@ Approximate retention:
 
 | Position-send cadence | Retention |
 | --- | ---: |
-| 10 s moving cadence | 37.8 hours / 1.6 days |
-| 30 s active cadence | 4.7 days |
-| 120 s stationary cadence | 18.9 days |
+| 10 s motion cadence | 37.8 hours / 1.6 days |
+| 120 s idle cadence | 18.9 days |
 
 The ring resumes after reboot by scanning valid records and appending after the highest sequence number. When it wraps, it erases one `4 KiB` sector at a time before reusing it. The host decoder can read v1, v2, v3, v4, v5, v6, and v7 records.
 

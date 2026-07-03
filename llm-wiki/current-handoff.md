@@ -42,9 +42,10 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - The current LoRaWAN position payload layout remains port `4`, packed `int32_t lat`, `int32_t lon`, and `uint16_t hdop`.
 - `hdop=65535` (`0xffff`) is reserved as a stale/no-current-fix heartbeat marker. In that case latitude/longitude are the last known usable position, not a fresh fix.
 - Current intended intervals:
-  - stationary: `120 s`;
-  - active: `30 s`;
-  - moving: `10 s`.
+  - idle/stationary: `120 s`;
+  - motion: `10 s`.
+- Motion cadence starts when the accelerometer detects motion or GNSS speed is at least `0.5 m/s` (`1.8 km/h`).
+- The motion timer is reset by each motion signal; after `30 s` without motion, cadence returns to idle.
 - Motion classification uses GNSS speed plus accelerometer data.
 - Accelerometer handling is orientation-independent: it uses vector magnitude and vector delta, not a fixed `Z == gravity` assumption.
 - GNSS fixes are gated by satellite count and HDOP.
@@ -91,8 +92,7 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
   - recovery wait records are still logged periodically so long no-link periods remain visible.
 - LoRaWAN join retry backoff is now motion-aware:
   - normal stationary/unknown retry backoff still grows up to `300 s`;
-  - active motion caps retry delay at `60 s`;
-  - moving caps retry delay at `30 s`;
+  - motion caps retry delay at `30 s`;
   - the retry sleep checks motion in short chunks, so movement can shorten an already-running long backoff.
 - Local diagnostic records are now version `7` and `48` bytes. Version `7` keeps the version `6` binary layout and adds explicit LoRaWAN link-event result codes. Fields capture:
   - current LoRaWAN datarate when the stack reports one;
@@ -129,7 +129,7 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - The v7 link-recovery build passed on 2026-07-02. Generated `zephyr.bin` size was `258048` bytes, SHA256 `DF87D3B1FDF2536FF92DD1C23F7470BC5231A2A7E4DAAE91964685D6D7064012`.
 - The v7 image was flashed app-only to the permanent bench tracker, preserving settings. A short boot capture showed settings loaded, diagnostic log ready, IO34 battery monitor ready, GNSS fix, OTAA join success, downlink callback, datarate `DR_0`, and one confirmed port `4` position uplink. No `FATAL`, `ASSERT`, send-failure, or last-resort reboot markers appeared in the filtered capture.
 - A post-flash diagnostic dump decoded successfully. The partition still contained older records, but the new v7 records included `link_boot`, `link_init_attempt`, `link_init_ok`, `link_join_attempt`, `link_recovery_wait`, `link_join_success`, `not_joined`, and `sent` records, confirming that link-state events and normal position records decode together.
-- The motion-aware no-reboot recovery build passed on 2026-07-03. Generated `zephyr.bin` size was `258048` bytes, SHA256 `BBB02AD37AD5C4F057EF8A246FA18C28F70DE374F5320BFEF805D302169D387B`.
+- The motion-aware no-reboot recovery build passed on 2026-07-03. Generated `zephyr.bin` size was `258048` bytes, SHA256 `CA39F5A22E72618816887B64E24E44877E88C855B669A882A29272D535729B0F`.
 - Additional stock TrackerD-LS units are now on the bench. Exact USB serials, ChirpStack mapping observations, stock backup details, and flash cautions are documented only in ignored private development-group notes.
 
 ## Next Best Steps

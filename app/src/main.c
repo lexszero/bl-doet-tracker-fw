@@ -30,7 +30,6 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define LEDS_NODE_ID DT_COMPAT_GET_ANY_STATUS_OKAY(gpio_leds)
 
 #define POSITION_UPLINK_MOVING_INTERVAL_MS 10000
-#define POSITION_UPLINK_ACTIVE_INTERVAL_MS 30000
 #define POSITION_UPLINK_STATIONARY_INTERVAL_MS 120000
 #define POSITION_UPLINK_MOTION_RESUME_MIN_MS 3000
 #define POSITION_UPLINK_CONFIRMED_INTERVAL_MS 600000
@@ -38,20 +37,17 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_PORT 4
 #define POSITION_STALE_HDOP UINT16_MAX
 #define LORAWAN_RECOVERY_LOG_INTERVAL_MS 900000
-#define DIAGNOSTIC_HEARTBEAT_INTERVAL_MS POSITION_UPLINK_STATIONARY_INTERVAL_MS
 
 #define LORAWAN_JOIN_RETRY_MIN_MS 15000
 #define LORAWAN_JOIN_RETRY_MAX_MS 300000
-#define LORAWAN_JOIN_RETRY_ACTIVE_MAX_MS 60000
-#define LORAWAN_JOIN_RETRY_MOVING_MAX_MS 30000
+#define LORAWAN_JOIN_RETRY_MOTION_MAX_MS 30000
 #define LORAWAN_JOIN_RETRY_POLL_MS 1000
 #define LORAWAN_LINK_THREAD_STACK_SIZE 4096
 #define LORAWAN_LINK_THREAD_PRIORITY 7
 
 #define GNSS_GOOD_HDOP_MAX 2500
 #define GNSS_GOOD_SATELLITES_MIN 4
-#define GNSS_ACTIVE_SPEED_MM_S 500
-#define GNSS_MOVING_SPEED_MM_S 2000
+#define GNSS_MOTION_SPEED_MM_S 500
 #define GNSS_STILL_ALTITUDE_JUMP_MM 5000
 #define GNSS_DRIFT_SUPPRESS_MS 60000
 
@@ -322,6 +318,8 @@ static int32_t sensor_value_to_mm_s2(const struct sensor_value *value)
 
 static bool gnss_position_is_usable(const struct accel_motion_sample *accel)
 {
+	ARG_UNUSED(accel);
+
 	if (gnss_data.info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
 		return false;
 	}
@@ -339,11 +337,6 @@ static bool gnss_position_is_usable(const struct accel_motion_sample *accel)
 	}
 
 	if (gnss_drift_suppressed) {
-		return false;
-	}
-
-	if (accel_ready && accel->valid && !accel->moving &&
-	    gnss_data.nav_data.speed >= GNSS_ACTIVE_SPEED_MM_S) {
 		return false;
 	}
 
@@ -413,7 +406,7 @@ static uint32_t filtered_gnss_speed_mm_s(const struct accel_motion_sample *accel
 	}
 
 	if (accel->valid && !accel->moving && have_last_gnss_altitude &&
-	    speed >= GNSS_ACTIVE_SPEED_MM_S &&
+	    speed >= GNSS_MOTION_SPEED_MM_S &&
 	    altitude_delta > GNSS_STILL_ALTITUDE_JUMP_MM) {
 		gnss_drift_suppressed_until = now + GNSS_DRIFT_SUPPRESS_MS;
 	}
@@ -436,25 +429,24 @@ static uint32_t filtered_gnss_speed_mm_s(const struct accel_motion_sample *accel
 	return speed;
 }
 
-static enum tracker_motion_state update_motion_state(const struct accel_motion_sample *accel,
-						     int64_t now)
+static bool motion_hold_active(int64_t now)
 {
-	uint32_t speed = filtered_gnss_speed_mm_s(accel, now);
-	bool accel_motion_now = accel->valid && accel->moving;
-	bool allow_gnss_motion = !accel_ready || accel_motion_now;
-	bool moving_now = allow_gnss_motion && speed >= GNSS_MOVING_SPEED_MM_S;
-	bool active_now = accel_motion_now ||
-			  (allow_gnss_motion && speed >= GNSS_ACTIVE_SPEED_MM_S);
+	return last_motion_timestamp > 0 &&
+	       (now - last_motion_timestamp) < MOTION_HOLD_MS;
+}
+
+static enum tracker_motion_state update_motion_state_from_signal(
+	const struct accel_motion_sample *accel, int64_t now, uint32_t speed,
+	bool motion_now)
+{
 	enum tracker_motion_state previous_state = motion_state;
 
-	if (active_now) {
+	if (motion_now) {
 		last_motion_timestamp = now;
 	}
 
-	if (moving_now) {
+	if (motion_now || motion_hold_active(now)) {
 		motion_state = TRACKER_MOTION_MOVING;
-	} else if (active_now || (now - last_motion_timestamp) < MOTION_HOLD_MS) {
-		motion_state = TRACKER_MOTION_ACTIVE;
 	} else {
 		motion_state = TRACKER_MOTION_STATIONARY;
 	}
@@ -478,18 +470,27 @@ static enum tracker_motion_state update_motion_state(const struct accel_motion_s
 	return motion_state;
 }
 
+static enum tracker_motion_state update_motion_state(const struct accel_motion_sample *accel,
+						     int64_t now)
+{
+	uint32_t speed = filtered_gnss_speed_mm_s(accel, now);
+	bool accel_motion_now = accel->valid && accel->moving;
+	bool speed_motion_now = speed >= GNSS_MOTION_SPEED_MM_S;
+
+	return update_motion_state_from_signal(accel, now, speed,
+					       accel_motion_now || speed_motion_now);
+}
+
 static uint32_t uplink_interval_ms_for_motion(enum tracker_motion_state state)
 {
 	switch (state) {
 	case TRACKER_MOTION_MOVING:
-		return POSITION_UPLINK_MOVING_INTERVAL_MS;
 	case TRACKER_MOTION_ACTIVE:
-		return POSITION_UPLINK_ACTIVE_INTERVAL_MS;
+		return POSITION_UPLINK_MOVING_INTERVAL_MS;
 	case TRACKER_MOTION_STATIONARY:
-		return POSITION_UPLINK_STATIONARY_INTERVAL_MS;
 	case TRACKER_MOTION_UNKNOWN:
 	default:
-		return POSITION_UPLINK_ACTIVE_INTERVAL_MS;
+		return POSITION_UPLINK_STATIONARY_INTERVAL_MS;
 	}
 }
 
@@ -497,9 +498,8 @@ static uint32_t lorawan_join_retry_cap_ms(void)
 {
 	switch (motion_state) {
 	case TRACKER_MOTION_MOVING:
-		return LORAWAN_JOIN_RETRY_MOVING_MAX_MS;
 	case TRACKER_MOTION_ACTIVE:
-		return LORAWAN_JOIN_RETRY_ACTIVE_MAX_MS;
+		return LORAWAN_JOIN_RETRY_MOTION_MAX_MS;
 	case TRACKER_MOTION_STATIONARY:
 	case TRACKER_MOTION_UNKNOWN:
 	default:
@@ -834,17 +834,18 @@ static void handle_event_gnss_position(void)
 	led_status_off(LED_B);
 }
 
-static bool diagnostic_heartbeat_due(int64_t now)
+static bool diagnostic_heartbeat_due(int64_t now, uint32_t interval_ms)
 {
 	if (!have_logged_diagnostic_position) {
-		return now >= DIAGNOSTIC_HEARTBEAT_INTERVAL_MS;
+		return now >= interval_ms;
 	}
 
-	return now - last_diagnostic_position_timestamp >= DIAGNOSTIC_HEARTBEAT_INTERVAL_MS;
+	return now - last_diagnostic_position_timestamp >= interval_ms;
 }
 
 static bool send_stale_position_heartbeat(int64_t now,
 					  enum tracker_motion_state current_motion,
+					  uint32_t interval_ms,
 					  const struct accel_motion_sample *accel)
 {
 	struct msg_up_position msg;
@@ -869,9 +870,8 @@ static bool send_stale_position_heartbeat(int64_t now,
 			ret, message_type == LORAWAN_MSG_CONFIRMED ?
 			"confirmed" : "unconfirmed");
 		log_position_uplink_decision_for_payload(now, current_motion,
-				 DIAGNOSTIC_HEARTBEAT_INTERVAL_MS, accel,
-				 false, ret, DIAGNOSTIC_LOG_UPLINK_NO_FIX,
-				 message_type, &msg);
+				 interval_ms, accel, false, ret,
+				 DIAGNOSTIC_LOG_UPLINK_NO_FIX, message_type, &msg);
 		lorawan_note_position_send_failure(ret, message_type);
 		return true;
 	}
@@ -879,9 +879,8 @@ static bool send_stale_position_heartbeat(int64_t now,
 	lorawan_note_position_send_success();
 
 	log_position_uplink_decision_for_payload(now, current_motion,
-				 DIAGNOSTIC_HEARTBEAT_INTERVAL_MS, accel,
-				 false, ret, DIAGNOSTIC_LOG_UPLINK_NO_FIX,
-				 message_type, &msg);
+				 interval_ms, accel, false, ret,
+				 DIAGNOSTIC_LOG_UPLINK_NO_FIX, message_type, &msg);
 
 	LOG_INF("stale position heartbeat: type=%s lat=%d lon=%d hdop=0x%04x",
 		message_type == LORAWAN_MSG_CONFIRMED ? "confirmed" : "unconfirmed",
@@ -895,28 +894,26 @@ static void handle_diagnostic_heartbeat(void)
 	int64_t now = k_uptime_get();
 	struct accel_motion_sample accel;
 	enum tracker_motion_state current_motion = TRACKER_MOTION_UNKNOWN;
-
-	if (!diagnostic_heartbeat_due(now)) {
-		return;
-	}
+	uint32_t interval_ms;
 
 	read_accel_motion(&accel);
-	if (accel.valid) {
-		current_motion = accel.moving ?
-				 TRACKER_MOTION_ACTIVE :
-				 TRACKER_MOTION_STATIONARY;
-	}
+	current_motion = update_motion_state_from_signal(&accel, now, 0,
+							 accel.valid && accel.moving);
+	interval_ms = uplink_interval_ms_for_motion(current_motion);
 
 	if (gnss_position_is_usable(&accel)) {
 		return;
 	}
 
-	if (send_stale_position_heartbeat(now, current_motion, &accel)) {
+	if (!diagnostic_heartbeat_due(now, interval_ms)) {
 		return;
 	}
 
-	log_position_uplink_decision(now, current_motion,
-				     DIAGNOSTIC_HEARTBEAT_INTERVAL_MS, &accel,
+	if (send_stale_position_heartbeat(now, current_motion, interval_ms, &accel)) {
+		return;
+	}
+
+	log_position_uplink_decision(now, current_motion, interval_ms, &accel,
 				     false, -ENODATA,
 				     DIAGNOSTIC_LOG_UPLINK_NO_FIX,
 				     LORAWAN_MSG_UNCONFIRMED);
