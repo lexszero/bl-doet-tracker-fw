@@ -1,6 +1,6 @@
 # Storage and Logging
 
-Last updated: 2026-07-02.
+Last updated: 2026-07-04.
 
 This page captures what is currently known about persistent storage and longer-term logging on the TrackerD-LS Zephyr firmware.
 
@@ -66,7 +66,11 @@ This page captures what is currently known about persistent storage and longer-t
 
 ## Practical Longer-Term Logging
 
-Use bench-side serial capture for raw long logs. It avoids flash wear and keeps full UART text:
+Prefer receiver-side logs and diagnostic flash dumps for non-invasive long-running tests. USB serial capture is useful for controlled boot/smoke validation, but it is not currently proven safe as a passive observation path on this hardware/bench.
+
+Known open issue: a raw "no-reset" serial attach has been observed to correlate with loss of subsequent tracker uplinks and later loss of local diagnostic records. The exact mechanism is not known; it may involve USB-UART control lines, ESP32 reset/boot strapping, host tty behavior, firmware UART/logging behavior, or a hardware-specific interaction. Treat serial access as potentially disturbing until a known-safe adapter/helper flow is validated.
+
+For a controlled serial capture:
 
 ```shell
 tracker-console 2>&1 | tee tracker-serial.log
@@ -77,6 +81,8 @@ For a timed run on a bench host:
 ```shell
 timeout -s INT 6h tracker-console 2>&1 | tee tracker-serial-6h.log
 ```
+
+Do not use serial capture as evidence that a field tracker would have continued running untouched. Capture receiver-side state first, and if possible dump the diagnostic partition before any serial experiment.
 
 For production firmware, avoid writing every Zephyr log line to internal flash. Internal flash is better suited to compact diagnostic records.
 

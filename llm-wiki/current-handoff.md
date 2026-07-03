@@ -146,4 +146,5 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 5. Check whether send failures are rate-limited and whether confirmed link checks produce downlink/RF evidence.
 6. Tune motion thresholds only after reviewing real movement traces.
 7. Decide later whether the LoRaWAN payload should include speed or whether speed should remain diagnostic-log-only.
-8. Keep public docs sanitized; keep bench/backend runbooks and personal agent state in ignored private notes.
+8. Investigate the USB serial attach behavior some day. Current evidence suggests opening serial can disturb the tracker, so do not treat serial console access as non-invasive until a safe method is proven.
+9. Keep public docs sanitized; keep bench/backend runbooks and personal agent state in ignored private notes.
