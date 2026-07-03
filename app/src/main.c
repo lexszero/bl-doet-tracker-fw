@@ -36,6 +36,8 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define POSITION_UPLINK_MOTION_RESUME_MIN_MS 3000
 #define POSITION_UPLINK_CONFIRMED_INTERVAL_MS 600000
 #define POSITION_UPLINK_FAILURES_BEFORE_REJOIN 3
+#define POSITION_UPLINK_PORT 4
+#define POSITION_STALE_HDOP UINT16_MAX
 #define LORAWAN_GOOD_GNSS_REBOOT_AFTER_MS 3600000
 #define LORAWAN_LINK_REBOOT_LAST_RESORT_MS 21600000
 #define LORAWAN_RECOVERY_LOG_INTERVAL_MS 900000
@@ -126,6 +128,9 @@ struct msg_up_position {
 	int32_t lon;
 	uint16_t hdop;
 } __attribute__((packed));
+
+static struct msg_up_position last_known_position;
+static bool have_last_known_position;
 
 static bool lorawan_is_joined(void)
 {
@@ -242,6 +247,21 @@ static uint8_t diagnostic_log_motion_state(enum tracker_motion_state state)
 static uint16_t u32_to_u16_saturated(uint32_t value)
 {
 	return value > UINT16_MAX ? UINT16_MAX : (uint16_t)value;
+}
+
+static struct msg_up_position current_position_payload(uint16_t hdop)
+{
+	return (struct msg_up_position){
+		.lat = (int32_t)(gnss_data.nav_data.latitude >> 5),
+		.lon = (int32_t)(gnss_data.nav_data.longitude >> 5),
+		.hdop = hdop,
+	};
+}
+
+static void remember_last_known_position(void)
+{
+	last_known_position = current_position_payload(u32_to_u16_saturated(gnss_data.info.hdop));
+	have_last_known_position = true;
 }
 
 static uint8_t u32_to_u8_saturated(uint32_t value)
@@ -476,12 +496,14 @@ static uint32_t uplink_interval_ms_for_motion(enum tracker_motion_state state)
 	}
 }
 
-static void log_position_uplink_decision(int64_t now, enum tracker_motion_state state,
+static void log_position_uplink_decision_for_payload(int64_t now,
+					 enum tracker_motion_state state,
 					 uint32_t interval_ms,
 					 const struct accel_motion_sample *accel,
 					 bool resumed_motion, int send_ret,
 					 uint8_t result,
-					 enum lorawan_message_type message_type)
+					 enum lorawan_message_type message_type,
+					 const struct msg_up_position *payload)
 {
 	struct diagnostic_log_uplink_entry entry = {0};
 	struct lorawan_node_status lorawan_status;
@@ -492,10 +514,13 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 
 	entry.uptime_ms = i64_to_u32_saturated(now);
 	entry.utc_packed = utc_packed;
-	entry.latitude = (int32_t)(gnss_data.nav_data.latitude >> 5);
-	entry.longitude = (int32_t)(gnss_data.nav_data.longitude >> 5);
+	entry.latitude = payload != NULL ? payload->lat :
+			 (int32_t)(gnss_data.nav_data.latitude >> 5);
+	entry.longitude = payload != NULL ? payload->lon :
+			  (int32_t)(gnss_data.nav_data.longitude >> 5);
 	entry.speed_cm_s = u32_to_u16_saturated((gnss_data.nav_data.speed + 5U) / 10U);
-	entry.hdop = u32_to_u16_saturated(gnss_data.info.hdop);
+	entry.hdop = payload != NULL ? payload->hdop :
+		     u32_to_u16_saturated(gnss_data.info.hdop);
 	entry.interval_s = u32_to_u16_saturated(interval_ms / 1000U);
 	entry.send_ret = int_to_i16_saturated(send_ret);
 	entry.motion_state = diagnostic_log_motion_state(state);
@@ -553,6 +578,18 @@ static void log_position_uplink_decision(int64_t now, enum tracker_motion_state 
 	(void)diagnostic_log_write_uplink(&entry);
 	last_diagnostic_position_timestamp = now;
 	have_logged_diagnostic_position = true;
+}
+
+static void log_position_uplink_decision(int64_t now, enum tracker_motion_state state,
+					 uint32_t interval_ms,
+					 const struct accel_motion_sample *accel,
+					 bool resumed_motion, int send_ret,
+					 uint8_t result,
+					 enum lorawan_message_type message_type)
+{
+	log_position_uplink_decision_for_payload(now, state, interval_ms, accel,
+						 resumed_motion, send_ret, result,
+						 message_type, NULL);
 }
 
 static enum lorawan_message_type position_message_type(int64_t now)
@@ -685,6 +722,8 @@ static void handle_event_gnss_position(void)
 		return;
 	}
 
+	remember_last_known_position();
+
 	if (!lorawan_is_joined()) {
 		if (lorawan_good_gnss_unjoined_timestamp == 0) {
 			lorawan_good_gnss_unjoined_timestamp = now;
@@ -715,11 +754,8 @@ static void handle_event_gnss_position(void)
 	pack_angle(gnss_data.nav_data.latitude, buf+0);
 	pack_angle(gnss_data.nav_data.longitude, buf+8);
 	*/
-	struct msg_up_position msg = {
-		.lat = (int32_t)(gnss_data.nav_data.latitude >> 5),
-		.lon = (int32_t)(gnss_data.nav_data.longitude >> 5),
-		.hdop = gnss_data.info.hdop
-	};
+	struct msg_up_position msg =
+		current_position_payload(u32_to_u16_saturated(gnss_data.info.hdop));
 	enum lorawan_message_type message_type = position_message_type(now);
 
 	last_uplink_attempt_timestamp = now;
@@ -728,7 +764,8 @@ static void handle_event_gnss_position(void)
 		last_confirmed_uplink_timestamp = now;
 	}
 
-	int ret = lorawan_send(4, (uint8_t *)&msg, sizeof(msg), message_type);
+	int ret = lorawan_send(POSITION_UPLINK_PORT, (uint8_t *)&msg, sizeof(msg),
+			       message_type);
 	if (ret < 0) {
 		LOG_ERR("position uplink failed: %d type=%s state=%s interval=%u ms",
 			ret, message_type == LORAWAN_MSG_CONFIRMED ? "confirmed" : "unconfirmed",
@@ -768,6 +805,53 @@ static bool diagnostic_heartbeat_due(int64_t now)
 	return now - last_diagnostic_position_timestamp >= DIAGNOSTIC_HEARTBEAT_INTERVAL_MS;
 }
 
+static bool send_stale_position_heartbeat(int64_t now,
+					  enum tracker_motion_state current_motion,
+					  const struct accel_motion_sample *accel)
+{
+	struct msg_up_position msg;
+	enum lorawan_message_type message_type;
+	int ret;
+
+	if (!lorawan_is_joined() || !have_last_known_position) {
+		return false;
+	}
+
+	msg = last_known_position;
+	msg.hdop = POSITION_STALE_HDOP;
+	message_type = position_message_type(now);
+	if (message_type == LORAWAN_MSG_CONFIRMED) {
+		last_confirmed_uplink_timestamp = now;
+	}
+
+	ret = lorawan_send(POSITION_UPLINK_PORT, (uint8_t *)&msg, sizeof(msg),
+			   message_type);
+	if (ret < 0) {
+		LOG_WRN("stale position heartbeat failed: %d type=%s",
+			ret, message_type == LORAWAN_MSG_CONFIRMED ?
+			"confirmed" : "unconfirmed");
+		log_position_uplink_decision_for_payload(now, current_motion,
+				 DIAGNOSTIC_HEARTBEAT_INTERVAL_MS, accel,
+				 false, ret, DIAGNOSTIC_LOG_UPLINK_NO_FIX,
+				 message_type, &msg);
+		lorawan_note_position_send_failure(ret, message_type);
+		return true;
+	}
+
+	lorawan_note_position_send_success();
+
+	log_position_uplink_decision_for_payload(now, current_motion,
+				 DIAGNOSTIC_HEARTBEAT_INTERVAL_MS, accel,
+				 false, ret, DIAGNOSTIC_LOG_UPLINK_NO_FIX,
+				 message_type, &msg);
+
+	LOG_INF("stale position heartbeat: type=%s lat=%d lon=%d hdop=0x%04x",
+		message_type == LORAWAN_MSG_CONFIRMED ? "confirmed" : "unconfirmed",
+		msg.lat, msg.lon, msg.hdop);
+
+	return true;
+}
+
 static void handle_diagnostic_heartbeat(void)
 {
 	int64_t now = k_uptime_get();
@@ -783,6 +867,14 @@ static void handle_diagnostic_heartbeat(void)
 		current_motion = accel.moving ?
 				 TRACKER_MOTION_ACTIVE :
 				 TRACKER_MOTION_STATIONARY;
+	}
+
+	if (gnss_position_is_usable(&accel)) {
+		return;
+	}
+
+	if (send_stale_position_heartbeat(now, current_motion, &accel)) {
+		return;
 	}
 
 	log_position_uplink_decision(now, current_motion,

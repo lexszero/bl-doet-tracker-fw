@@ -39,7 +39,8 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 ### Adaptive Uplink Cadence
 
 - Added first movement-aware position uplink policy.
-- The current LoRaWAN position payload is unchanged: port `4`, packed `int32_t lat`, `int32_t lon`, and `uint16_t hdop`.
+- The current LoRaWAN position payload layout remains port `4`, packed `int32_t lat`, `int32_t lon`, and `uint16_t hdop`.
+- `hdop=65535` (`0xffff`) is reserved as a stale/no-current-fix heartbeat marker. In that case latitude/longitude are the last known usable position, not a fresh fix.
 - Current intended intervals:
   - stationary: `120 s`;
   - active: `30 s`;
@@ -98,7 +99,7 @@ This page is public/GitHub-safe. Shared operational bench/backend details belong
 - Link-event records now cover boot, init attempt/result, join attempt/result, link marked down, recovery wait, and last-resort reboot. The host decoder labels records as `position` or `link_event` and avoids plotting locationless link events at `0,0`.
 - Zephyr's public LoRaWAN API used here does not expose current TX power directly, so receiver-side RSSI/SNR plus datarate/ADR/downlink information is the current observable proxy.
 - Battery-voltage monitoring is diagnostic-only data. The TrackerD-LS v1.3 schematic confirms `BAT+ -> 100k -> IO34/PA2 -> 470k -> GND`, so the firmware scales IO34 by `(100 + 470) / 470`. Stock Tracker_109 reports about `4002 mV`; the Zephyr ADC helper path clipped at about `3088 mV` pack voltage. The current experimental firmware bypasses Zephyr's clipped millivolt helper and reads IO34 with the ESP HAL ADC path plus Espressif line-fitting calibration.
-- The LoRaWAN position payload is unchanged.
+- The LoRaWAN position payload remains the same 10 byte binary layout, with `hdop=65535` reserved for stale/no-current-fix heartbeats using the last known usable position.
 - The host diagnostic decoder was updated to read old `40` byte v1 records and `48` byte v2/v3/v4/v5/v6/v7 records.
 - The ChirpStack live-map script now also preserves frequency and LoRa modulation metadata when the application event includes it.
 - The live-map script supports multiple DevEUIs, writes `latest_by_device.json` and `device_events.json`, colors devices separately, and defaults the browser view to decoded positions from the last 24 hours. `device_events.json` shows latest join/uplink events even when a payload is not decoded as a current firmware position point. The 24 hour filter is a view filter only; retained JSON/CSV/GeoJSON history still follows `--max-points`.

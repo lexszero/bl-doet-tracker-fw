@@ -1,6 +1,6 @@
 # LoRa Live Logging
 
-Last updated: 2026-07-01.
+Last updated: 2026-07-03.
 
 The repository now includes a generic ChirpStack live position logger:
 
@@ -9,6 +9,8 @@ scripts/dev/chirpstack_live_map.py
 ```
 
 It listens to ChirpStack application events for one or more devices, decodes the current tracker port `4` payload, writes CSV/JSON/GeoJSON outputs, and serves a small Leaflet/OpenStreetMap live map.
+
+The port `4` binary payload is `int32 lat`, `int32 lon`, and `uint16 hdop`. `hdop=65535` (`0xffff`) is reserved as a stale/no-current-fix heartbeat: latitude/longitude are the last known usable position, not a fresh GNSS fix.
 
 When ChirpStack includes RF metadata in the application event, the script also preserves gateway RSSI/SNR, frequency, spreading factor, bandwidth, and code rate. Firmware TX power is not currently visible through this receiver-side stream.
 
@@ -68,7 +70,7 @@ The browser map defaults to a `Last 24h` view and shows the latest decoded posit
 
 If `neighbourhoods.geojson` is present in the live-map output directory, the browser map offers a neighbourhood overlay. The default view anchors the `Power Hill` neighbourhood around the gateway reference coordinate `60.220101984, 24.836646496` while preserving the overlay's approximate meter scale, which is useful for comparing tracker movement against the neighbourhood-size footprint. Disable `Power Hill at gateway` to view the GeoJSON in its original coordinates.
 
-The current firmware port `4` LoRaWAN payload only contains latitude, longitude, and HDOP. Speed is available in the on-device diagnostic flash log, not in the LoRaWAN receiver stream, unless the payload format is changed later.
+The current firmware port `4` LoRaWAN payload only contains latitude, longitude, and HDOP. The live-map decoder exposes `status=position` for normal fixes and `status=stale_no_fix` for the `hdop=65535` heartbeat. Stale heartbeats are retained in JSON/CSV but are not used for route polylines. Speed is available in the on-device diagnostic flash log, not in the LoRaWAN receiver stream, unless the payload format is changed later.
 
 ## Operational Notes
 

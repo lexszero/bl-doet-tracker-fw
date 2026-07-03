@@ -35,6 +35,7 @@ from google.protobuf.json_format import MessageToDict
 
 POSITION_PORT = 4
 POSITION_PAYLOAD = struct.Struct("<iiH")
+POSITION_STALE_HDOP_RAW = 0xFFFF
 
 
 def point_key(point: dict[str, Any]) -> tuple[Any, ...]:
@@ -146,12 +147,20 @@ def latest_points_by_device(points: list[dict[str, Any]]) -> list[dict[str, Any]
     return summaries
 
 
-def decode_position(raw: bytes) -> tuple[float, float, float] | None:
+def decode_position(raw: bytes) -> dict[str, Any] | None:
     if len(raw) != POSITION_PAYLOAD.size:
         return None
 
     lat_i, lon_i, hdop = POSITION_PAYLOAD.unpack(raw)
-    return (lat_i << 5) / 1_000_000_000, (lon_i << 5) / 1_000_000_000, hdop / 1000
+    stale = hdop == POSITION_STALE_HDOP_RAW
+    return {
+        "lat": (lat_i << 5) / 1_000_000_000,
+        "lon": (lon_i << 5) / 1_000_000_000,
+        "hdop": hdop / 1000,
+        "hdop_raw": hdop,
+        "status": "stale_no_fix" if stale else "position",
+        "stale": stale,
+    }
 
 
 def body_get(body: dict[str, Any], snake: str, camel: str) -> Any:
@@ -189,7 +198,6 @@ def parse_uplink_point(body: dict[str, Any], dev_eui: str, device_label: str) ->
     if decoded is None:
         return None
 
-    lat, lon, hdop = decoded
     rx = best_rx(body)
     tx = tx_info(body)
     lora = tx_lora_modulation(tx)
@@ -201,9 +209,12 @@ def parse_uplink_point(body: dict[str, Any], dev_eui: str, device_label: str) ->
         "dev_addr": body.get("devAddr") or body.get("dev_addr") or "",
         "f_cnt": body_get(body, "f_cnt", "fCnt"),
         "f_port": port,
-        "lat": round(lat, 9),
-        "lon": round(lon, 9),
-        "hdop": round(hdop, 3),
+        "status": decoded["status"],
+        "stale": decoded["stale"],
+        "lat": round(decoded["lat"], 9),
+        "lon": round(decoded["lon"], 9),
+        "hdop": round(decoded["hdop"], 3),
+        "hdop_raw": decoded["hdop_raw"],
         "raw_hex": raw.hex(),
         "rssi": rx.get("rssi"),
         "snr": rx.get("snr"),
@@ -274,9 +285,12 @@ def write_outputs(out_dir: Path, points: list[dict[str, Any]]) -> None:
         "dev_addr",
         "f_cnt",
         "f_port",
+        "status",
+        "stale",
         "lat",
         "lon",
         "hdop",
+        "hdop_raw",
         "rssi",
         "snr",
         "gateway_id",
@@ -694,6 +708,7 @@ def write_index(out_dir: Path, title: str) -> None:
         received: ${{point.received_at}}<br>
         lat: ${{point.lat}}<br>
         lon: ${{point.lon}}<br>
+        status: ${{escapeHtml(point.status || 'position')}}<br>
         hdop: ${{point.hdop}}<br>
         rssi: ${{point.rssi ?? 'n/a'}} snr: ${{point.snr ?? 'n/a'}}<br>
         freq: ${{point.frequency ?? 'n/a'}} sf: ${{point.spreading_factor ?? 'n/a'}}
@@ -720,13 +735,16 @@ def write_index(out_dir: Path, title: str) -> None:
         for (const point of devicePoints) {{
           const latLng = [point.lat, point.lon];
           latLngs.push(latLng);
-          deviceLatLngs.push(latLng);
+          if (!point.stale) {{
+            deviceLatLngs.push(latLng);
+          }}
           const isLatest = point === latestForDevice;
           L.circleMarker(latLng, {{
             radius: isLatest ? 7 : 5,
-            color,
-            fillColor: color,
-            fillOpacity: isLatest ? 0.9 : 0.72,
+            color: point.stale ? '#6b7280' : color,
+            fillColor: point.stale ? '#9ca3af' : color,
+            fillOpacity: point.stale ? 0.55 : (isLatest ? 0.9 : 0.72),
+            dashArray: point.stale ? '3 3' : undefined,
             weight: isLatest ? 2 : 1
           }}).bindPopup(popup(point)).addTo(pointLayer);
         }}
@@ -776,7 +794,7 @@ def write_index(out_dir: Path, title: str) -> None:
         ? `<div>visible: ${{visible.length}} / retained: ${{points.length}}</div>
            <div class="${{ageClass}}">latest: ${{escapeHtml(deviceLabel(latest))}} ${{formatTime(latest)}} (${{ageText(ageMs)}} ago)</div>
            ${{latestEventLine}}
-           <div>latest position: ${{latest.lat}}, ${{latest.lon}} hdop ${{latest.hdop}}</div>
+           <div>latest point: ${{latest.lat}}, ${{latest.lon}} hdop ${{latest.hdop}} ${{escapeHtml(latest.status || 'position')}}</div>
            ${{visible.length ? '' : '<div class="stale">No positions in the selected view.</div>'}}
            ${{deviceSummaries}}`
         : `${{latestEventLine || 'Waiting for LoRaWAN positions...'}}${{deviceSummaries}}`;
@@ -858,10 +876,12 @@ def stream_events(
                 point = parse_uplink_point(body, dev_eui, device_label)
                 if point is not None:
                     if state.add_point(point):
+                        status = "stale heartbeat" if point.get("stale") else "position"
                         print(
-                            "[{now}] {label} position fcnt={fcnt} lat={lat:.9f} lon={lon:.9f} hdop={hdop:.3f}".format(
+                            "[{now}] {label} {status} fcnt={fcnt} lat={lat:.9f} lon={lon:.9f} hdop={hdop:.3f}".format(
                                 now=utc_now(),
                                 label=device_label,
+                                status=status,
                                 fcnt=point.get("f_cnt"),
                                 lat=point["lat"],
                                 lon=point["lon"],
