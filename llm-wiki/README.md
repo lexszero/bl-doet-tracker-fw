@@ -16,10 +16,12 @@ This wiki is the AI-agent knowledge base for this repository. It should stay sma
 - [GitHub issues snapshot](github-issues.md): current public issue summaries from Lex's referenced tracker repository.
 - [Branch inventory](branch-inventory.md): remote branch snapshot and tracker-branch notes.
 - [Project map](project-map.md): repository structure and important entry points.
+- [Hardware notes](hardware.md): public-safe board, sensor, and pinout observations.
 - [Build environment](build-environment.md): local Docker build workflow and Zephyr version direction.
 - [Development process](development-process.md): device access, remote validation, and development expectations.
 - [Storage and logging](storage-and-logging.md): current flash layout, logging options, and open SD-card questions.
 - [LoRa live logging](lora-live-logging.md): ChirpStack receiver-side position logging and live map workflow.
+- [OTA update plan](ota-update-plan.md): proposed MCUboot/WiFi update structure and validation plan.
 - [Working agreements](working-agreements.md): how AI agents should change code and maintain this wiki.
 
 ## How to update this wiki
@@ -33,5 +35,5 @@ This wiki is the AI-agent knowledge base for this repository. It should stay sma
 ## Known gaps
 
 - Product-specific firmware behavior is only lightly documented so far; the initial assignment is summarized in [Project context](project-context.md) and [GitHub issues snapshot](github-issues.md).
-- Detailed board revisions and Zephyr targets for the Dragino TrackerD-LS and TTGO T-Beam units need confirmation.
+- Detailed board revisions and Zephyr targets for TTGO T-Beam units need confirmation.
 - The tracker proof-of-concept currently lives on `dev/tracker`; see [Branch inventory](branch-inventory.md).
